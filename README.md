@@ -8,9 +8,9 @@ tools — runs inside a libkrun microVM. The host is the TUI and VMM.
 </p>
 
 <p align="center">
-  <a href="https://github.com/AdminTurnedDevOps/ABox/stargazers"><img src="https://img.shields.io/github/stars/AdminTurnedDevOps/ABox?style=flat&label=Stars" alt="Stars"></a>
+  <a href="https://github.com/AdminTurnedDevOps/ABox"><img src="https://img.shields.io/badge/GitHub-AdminTurnedDevOps%2FABox-181717?logo=github" alt="GitHub"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
-  <a href="https://github.com/AdminTurnedDevOps/ABox"><img src="https://img.shields.io/github/go-mod/go-version/AdminTurnedDevOps/ABox?label=Go" alt="Go"></a>
+  <a href="go.mod"><img src="https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white" alt="Go"></a>
   <a href="PLAN.md"><img src="https://img.shields.io/badge/Status-experimental-yellow" alt="Status"></a>
 </p>
 
