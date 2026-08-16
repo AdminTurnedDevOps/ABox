@@ -49,20 +49,18 @@ host Git alone.
 make build
 make image
 export PATH="$PWD/bin:$PATH"
-export XAI_API_KEY=...          # or OPENAI_API_KEY / ANTHROPIC_API_KEY
 abox
 ```
 
-- `enter` sends a prompt (`shift+enter` / `alt+enter` for a new line)
 - `/provider` sets Grok, OpenAI, or Anthropic API keys
 - `ctrl+c` quits
-- The agent runs only inside the guest
+- The agent runs only inside the guest (MicroVM)
 
 ## Test
 
-Open `abox`
+1. Open `abox` on any terminal
 
-Send any prompt.
+2. Send any prompt.
 
 Example:
 

@@ -51,7 +51,7 @@ type doneMsg struct{}
 
 func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string) model {
 	ta := textarea.New()
-	ta.Placeholder = "Ask ABox to work in the guest…"
+	ta.Placeholder = "Ask ABox Anything"
 	ta.Focus()
 	ta.SetHeight(3)
 	ta.ShowLineNumbers = false
@@ -330,13 +330,18 @@ func (m model) View() tea.View {
 	}
 	header := bar.Render(fmt.Sprintf("ABox  %s/%s  vm:%s  net:%s  %s", m.sel.Provider, m.sel.Model, m.vmState, m.cfg.Connectivity.Mode, cred))
 
-	bodyH := max(3, m.height-10)
+	wrapW := m.width
+	if wrapW <= 0 {
+		wrapW = 80
+	}
+	bodyH := max(3, m.height-8)
 	if m.height == 0 {
 		bodyH = 16
 	}
-	body := strings.Join(tail(m.log, bodyH), "\n")
+	wrapped := wrapLog(m.log, wrapW)
+	body := strings.Join(tail(wrapped, bodyH), "\n")
 	if body == "" {
-		body = muted.Render("Type / for commands. /provider sets Grok, OpenAI, or Anthropic keys. Enter sends.")
+		body = muted.Render("Type / for commands. /provider sets Grok, OpenAI, or Anthropic keys.")
 	}
 
 	composer := m.ta.View()
@@ -390,6 +395,40 @@ func (m model) View() tea.View {
 	v.AltScreen = true
 	v.BackgroundColor = lipgloss.Color("#050505")
 	return v
+}
+
+func wrapLog(lines []string, width int) []string {
+	if width < 8 {
+		width = 8
+	}
+	var out []string
+	for _, line := range lines {
+		out = append(out, wrapLine(line, width)...)
+	}
+	return out
+}
+
+func wrapLine(s string, width int) []string {
+	s = strings.ReplaceAll(s, "\t", "    ")
+	if s == "" {
+		return []string{""}
+	}
+	var lines []string
+	for _, para := range strings.Split(s, "\n") {
+		for len(para) > width {
+			cut := strings.LastIndex(para[:width], " ")
+			if cut < width/4 {
+				cut = width
+			}
+			lines = append(lines, strings.TrimRight(para[:cut], " "))
+			para = strings.TrimLeft(para[cut:], " ")
+		}
+		lines = append(lines, para)
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
 }
 
 func tail(in []string, n int) []string {
