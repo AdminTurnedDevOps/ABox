@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/AdminTurnedDevOps/ABox/internal/agent"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
 	"github.com/AdminTurnedDevOps/ABox/internal/repository"
@@ -91,7 +90,7 @@ func run() error {
 		if image == "" {
 			image = filepath.Join(config.ImageDir(), "abox-guest.raw")
 		}
-		if err := runtime.Prepare(sess, image); err != nil {
+		if err := runtime.Prepare(sess, image, sel, currentSecrets()); err != nil {
 			if execMode {
 				return err
 			}
@@ -144,21 +143,32 @@ func run() error {
 		return nil
 	}
 	if execMode {
-		return runExec(sel, sb, *prompt)
+		return runExec(sb, *prompt)
 	}
 	return tui.Run(cfg, sel, sb, vmState)
 }
 
-func runExec(sel config.Model, sb *runtime.Sandbox, prompt string) error {
+func runExec(sb *runtime.Sandbox, prompt string) error {
 	if prompt == "" {
 		return fmt.Errorf("abox exec requires --prompt")
 	}
+	if sb == nil {
+		return fmt.Errorf("agent runs only in the microVM")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	loop := &agent.Loop{Model: sel, Sandbox: sb}
 	enc := json.NewEncoder(os.Stdout)
-	loop.OnEvent = func(e agent.UIEvent) {
+	return sb.UserTurn(ctx, prompt, func(e protocol.AgentEvent) {
 		_ = enc.Encode(e)
+	})
+}
+
+func currentSecrets() map[string]string {
+	out := map[string]string{}
+	for _, name := range []string{"XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if v := os.Getenv(name); v != "" {
+			out[name] = v
+		}
 	}
-	return loop.Turn(ctx, prompt)
+	return out
 }

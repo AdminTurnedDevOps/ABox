@@ -12,9 +12,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/AdminTurnedDevOps/ABox/internal/agent"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
+	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
 type uiMode int
@@ -29,7 +29,6 @@ type model struct {
 	cfg      config.File
 	sel      config.Model
 	sandbox  *runtime.Sandbox
-	loop     *agent.Loop
 	ta       textarea.Model
 	keyIn    textinput.Model
 	mode     uiMode
@@ -43,10 +42,10 @@ type model struct {
 	vmState  string
 	err      string
 	cancel   context.CancelFunc
-	events   <-chan agent.UIEvent
+	events   <-chan protocol.AgentEvent
 }
 
-type evMsg agent.UIEvent
+type evMsg protocol.AgentEvent
 type errMsg error
 type doneMsg struct{}
 
@@ -65,8 +64,7 @@ func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string)
 	ki.EchoCharacter = '•'
 	ki.Placeholder = "paste API key"
 	ki.Prompt = "key> "
-	loop := &agent.Loop{Model: sel, Sandbox: sb}
-	return model{cfg: cfg, sel: sel, sandbox: sb, loop: loop, ta: ta, keyIn: ki, vmState: vmState}
+	return model{cfg: cfg, sel: sel, sandbox: sb, ta: ta, keyIn: ki, vmState: vmState}
 }
 
 func (m model) Init() tea.Cmd { return textarea.Blink }
@@ -203,17 +201,20 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") {
 		return m.runSlash(text)
 	}
+	if m.sandbox == nil {
+		m.err = "agent runs only in the microVM (vm not ready)"
+		return m, nil
+	}
 	m.ta.Reset()
 	m.log = append(m.log, "you: "+text, "")
 	m.busy = true
 	m.err = ""
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	ch := make(chan agent.UIEvent, 32)
+	ch := make(chan protocol.AgentEvent, 32)
 	m.events = ch
-	m.loop.OnEvent = func(e agent.UIEvent) { ch <- e }
 	go func() {
-		_ = m.loop.Turn(ctx, text)
+		_ = m.sandbox.UserTurn(ctx, text, func(e protocol.AgentEvent) { ch <- e })
 		close(ch)
 	}()
 	return m, waitEvent(ch)
@@ -283,13 +284,19 @@ func (m model) saveProviderKey() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.sel = sel
-	m.loop.Model = sel
+	if m.sandbox != nil {
+		secrets := map[string]string{m.provPick.Env: key}
+		if err := m.sandbox.SetModel(context.Background(), sel, secrets); err != nil {
+			m.err = "saved on host but guest agent update failed: " + err.Error()
+			return m, nil
+		}
+	}
 	m.err = ""
-	m.log = append(m.log, "connected "+m.provPick.Label+"  (key stored locally, not logged)")
+	m.log = append(m.log, "connected "+m.provPick.Label+"  (agent in microVM)")
 	return m, nil
 }
 
-func waitEvent(ch <-chan agent.UIEvent) tea.Cmd {
+func waitEvent(ch <-chan protocol.AgentEvent) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
@@ -316,14 +323,12 @@ func (m model) View() tea.View {
 	canvas := lipgloss.NewStyle().Foreground(lipgloss.Color("#F4F4F5")).Background(lipgloss.Color("#050505"))
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#71717A"))
 	bar := lipgloss.NewStyle().Foreground(lipgloss.Color("#F4F4F5")).Background(lipgloss.Color("#141416")).Padding(0, 1)
-	warn := lipgloss.NewStyle().Foreground(lipgloss.Color("#D4A017"))
 
 	cred := "no key"
 	if m.sel.CredentialPresent() {
 		cred = "key ok"
 	}
 	header := bar.Render(fmt.Sprintf("ABox  %s/%s  vm:%s  net:%s  %s", m.sel.Provider, m.sel.Model, m.vmState, m.cfg.Connectivity.Mode, cred))
-	notice := warn.Render("experimental · isolation Planned until hardware tests pass · tools run only in the guest")
 
 	bodyH := max(3, m.height-10)
 	if m.height == 0 {
@@ -336,7 +341,7 @@ func (m model) View() tea.View {
 
 	composer := m.ta.View()
 	extra := ""
-	footer := muted.Render("enter send  ·  /provider  ·  ctrl+c quit")
+	footer := muted.Render("/provider  ·  ctrl+c quit")
 	switch m.mode {
 	case modeProviderPick:
 		var b strings.Builder
@@ -381,7 +386,7 @@ func (m model) View() tea.View {
 		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("#B54A4A")).Render(m.err)
 	}
 
-	content := canvas.Render(strings.Join([]string{header, notice, "", body, "", extra + composer, footer}, "\n"))
+	content := canvas.Render(strings.Join([]string{header, "", body, "", extra + composer, footer}, "\n"))
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.BackgroundColor = lipgloss.Color("#050505")

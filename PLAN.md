@@ -8,8 +8,9 @@ another coding-agent harness.
 
 Its defining property is microVM-native execution:
 
-> Model-generated commands and effectful tools never execute directly on the
-> developer's host. The answer to "host or sandbox?" is always "sandbox."
+> The agent runs inside the microVM. Prompts, model calls, tools, and
+> generated code are guest work. The host is a TUI, VMM, and reviewed
+> patch import. The answer to "host or sandbox?" is always "sandbox."
 
 ABox's first milestone must provide:
 
@@ -50,7 +51,7 @@ The current plan makes these decisions:
 | Initial microVM backend | libkrun over Apple Hypervisor.framework |
 | Runtime integration | Dedicated `abox-vmm` Go helper with a narrow cgo boundary |
 | Guest network | No NIC and no libkrun TSI in milestone one |
-| Model traffic | Host-side only |
+| Model traffic | Guest agent calls providers; TSI inet for HTTPS only |
 | Providers | OpenAI, Anthropic, and Grok through xAI |
 | Repository state | Clean Git worktree only |
 | Host workspace sharing | Prohibited |
@@ -174,17 +175,16 @@ command-line options, or remote destinations.
 The host-side `abox` process owns:
 
 - Terminal UI
-- User interaction
-- Agent and model loop
-- Model-provider clients
-- Provider credentials
+- User interaction forwarded into the guest agent
 - Session metadata
-- Context management
 - MicroVM lifecycle orchestration
 - Policy and connectivity configuration
-- The endpoint-bound package and remote MCP connectivity broker
 - Audit records
 - Patch review and confirmed import
+
+Provider credentials may be entered on the host (`/provider`) and are
+copied into the guest agent so the model client runs inside the
+microVM. The host must not run the agent loop or call provider APIs.
 
 The host supervisor must remain small. It must not contain an arbitrary shell
 execution path, generated-code runner, or generic guest-to-host file service.
@@ -219,6 +219,9 @@ ownership.
 The `abox-guest` worker and everything it starts are untrusted. The design
 assumes the guest can become fully compromised, including guest root and the
 guest kernel.
+
+The guest owns the agent: the prompt, the model client, tools, and
+everything the model starts.
 
 The guest owns all effectful tools:
 

@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
+	"github.com/AdminTurnedDevOps/ABox/internal/guest/egress"
 )
 
 type Event struct {
@@ -119,7 +119,7 @@ func streamOpenAICompat(ctx context.Context, base, key, model string, messages [
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := egress.Client()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -256,7 +256,7 @@ func streamAnthropic(ctx context.Context, model config.Model, key string, messag
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
+	resp, err := egress.Client().Do(req)
 	if err != nil {
 		return nil, err
 	}

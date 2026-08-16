@@ -7,24 +7,16 @@ import (
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
+	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
 	"github.com/AdminTurnedDevOps/ABox/internal/provider"
-	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
-type UIEvent struct {
-	Kind   string
-	Text   string
-	Tool   string
-	Status string
-	Err    string
-}
-
 type Loop struct {
 	Model    config.Model
-	Sandbox  *runtime.Sandbox
+	Repo     tools.Repo
 	Messages []provider.Message
-	OnEvent  func(UIEvent)
+	OnEvent  func(protocol.AgentEvent)
 }
 
 func BuiltinTools() []provider.ToolSchema {
@@ -50,18 +42,23 @@ func BuiltinTools() []provider.ToolSchema {
 	}
 }
 
-func (l *Loop) emit(e UIEvent) {
+func (l *Loop) emit(e protocol.AgentEvent) {
 	if l.OnEvent != nil {
 		l.OnEvent(e)
 	}
 }
 
 func (l *Loop) Turn(ctx context.Context, user string) error {
+	if l.Repo.Root == "" {
+		err := fmt.Errorf("agent runs only inside the microVM")
+		l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
+		return err
+	}
 	l.Messages = append(l.Messages, provider.Message{Role: "user", Content: user})
 	for i := 0; i < 16; i++ {
 		events, err := provider.Stream(ctx, l.Model, l.Messages, BuiltinTools())
 		if err != nil {
-			l.emit(UIEvent{Kind: "error", Err: err.Error()})
+			l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
 			return err
 		}
 		var text string
@@ -70,11 +67,11 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 			switch ev.Type {
 			case "text":
 				text += ev.Text
-				l.emit(UIEvent{Kind: "text", Text: ev.Text})
+				l.emit(protocol.AgentEvent{Kind: "text", Text: ev.Text})
 			case "tool":
 				tool = ev
 			case "error":
-				l.emit(UIEvent{Kind: "error", Err: ev.Err.Error()})
+				l.emit(protocol.AgentEvent{Kind: "error", Err: ev.Err.Error()})
 				return ev.Err
 			}
 		}
@@ -82,7 +79,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 			if text != "" {
 				l.Messages = append(l.Messages, provider.Message{Role: "assistant", Content: text})
 			}
-			l.emit(UIEvent{Kind: "done"})
+			l.emit(protocol.AgentEvent{Kind: "done"})
 			return nil
 		}
 		l.Messages = append(l.Messages, provider.Message{
@@ -94,9 +91,9 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 		result, err := l.execTool(ctx, tool)
 		if err != nil {
 			result = "error: " + err.Error()
-			l.emit(UIEvent{Kind: "tool", Tool: tool.ToolName, Status: "error", Err: err.Error()})
+			l.emit(protocol.AgentEvent{Kind: "tool", Tool: tool.ToolName, Status: "error", Err: err.Error()})
 		} else {
-			l.emit(UIEvent{Kind: "tool", Tool: tool.ToolName, Status: "ok", Text: truncate(result, 400)})
+			l.emit(protocol.AgentEvent{Kind: "tool", Tool: tool.ToolName, Status: "ok", Text: truncate(result, 400)})
 		}
 		l.Messages = append(l.Messages, provider.Message{
 			Role:       "tool",
@@ -108,67 +105,62 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 }
 
 func (l *Loop) execTool(ctx context.Context, ev provider.Event) (string, error) {
-	if l.Sandbox == nil {
-		return "", fmt.Errorf("sandbox unavailable; model tools never run on the host")
-	}
 	switch ev.ToolName {
 	case "list_files":
 		var args struct {
 			Path string `json:"path"`
 		}
 		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		var res protocol.ListFilesResult
-		if err := l.Sandbox.Call(ctx, "list_files", protocol.ListFilesParams{Path: args.Path, Depth: 6, Limit: 500}, &res); err != nil {
+		paths, err := l.Repo.List(args.Path, 6, 500)
+		if err != nil {
 			return "", err
 		}
-		b, _ := json.Marshal(res.Paths)
+		b, _ := json.Marshal(paths)
 		return string(b), nil
 	case "read_file":
 		var args struct {
 			Path string `json:"path"`
 		}
 		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		var res protocol.ReadFileResult
-		if err := l.Sandbox.Call(ctx, "read_file", protocol.ReadFileParams{Path: args.Path, MaxBytes: 64 << 10}, &res); err != nil {
+		content, bin, _, err := l.Repo.Read(args.Path, 64<<10)
+		if err != nil {
 			return "", err
 		}
-		if res.Binary {
+		if bin {
 			return "[binary file]", nil
 		}
-		return res.Content, nil
+		return content, nil
 	case "search":
 		var args struct {
 			Query string `json:"query"`
 		}
 		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		var res protocol.SearchResult
-		if err := l.Sandbox.Call(ctx, "search", protocol.SearchParams{Query: args.Query, Limit: 40}, &res); err != nil {
+		matches, err := l.Repo.Search(args.Query, ".", 40)
+		if err != nil {
 			return "", err
 		}
-		b, _ := json.Marshal(res.Matches)
+		b, _ := json.Marshal(matches)
 		return string(b), nil
 	case "apply_patch":
 		var args struct {
 			Patch string `json:"patch"`
 		}
 		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		var res protocol.ApplyPatchResult
-		if err := l.Sandbox.Call(ctx, "apply_patch", protocol.ApplyPatchParams{Patch: args.Patch}, &res); err != nil {
-			return "", err
-		}
-		return res.Output, nil
+		return l.Repo.ApplyPatch(args.Patch)
 	case "run_command":
 		var args struct {
 			Command string `json:"command"`
 		}
 		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		defer cancel()
-		var res protocol.RunCommandResult
-		if err := l.Sandbox.Call(ctx, "run_command", protocol.RunCommandParams{Command: args.Command, Timeout: 60}, &res); err != nil {
+		timeout := 60 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			timeout = time.Until(deadline)
+		}
+		exit, stdout, stderr, _, _, err := l.Repo.Run(args.Command, "", timeout, tools.DefaultMaxOutput)
+		if err != nil && exit == -1 {
 			return "", err
 		}
-		return fmt.Sprintf("exit=%d\n%s\n%s", res.ExitCode, res.Stdout, res.Stderr), nil
+		return fmt.Sprintf("exit=%d\n%s\n%s", exit, stdout, stderr), nil
 	default:
 		return "", fmt.Errorf("unknown tool %q", ev.ToolName)
 	}
@@ -179,4 +171,14 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func ModelFromGuest(m protocol.GuestModel) config.Model {
+	return config.Model{
+		Name:          m.Name,
+		Provider:      m.Provider,
+		Model:         m.Model,
+		CredentialEnv: m.CredentialEnv,
+		BaseURL:       m.BaseURL,
+	}
 }

@@ -68,12 +68,20 @@ func (s *Session) GuestConfigJSON() string {
 	return filepath.Join(s.Dir, "guest-config.json")
 }
 
-func (s *Session) WriteGuestConfig() error {
+func (s *Session) WriteGuestConfig(model config.Model, secrets map[string]string) error {
 	cfg := protocol.GuestConfig{
 		SessionID:  s.ID,
 		Capability: s.Capability,
 		VsockPort:  protocol.RPCPort,
 		RepoDir:    "/work/repo",
+		Model: protocol.GuestModel{
+			Name:          model.Name,
+			Provider:      model.Provider,
+			Model:         model.Model,
+			CredentialEnv: model.CredentialEnv,
+			BaseURL:       model.BaseURL,
+		},
+		Secrets: secrets,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

@@ -37,7 +37,7 @@ type VMMConfig struct {
 	ConsoleLog string `json:"console_log"`
 }
 
-func Prepare(sess *session.Session, imagePath string) error {
+func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string) error {
 	if imagePath == "" {
 		imagePath = filepath.Join(config.ImageDir(), "abox-guest.raw")
 	}
@@ -47,7 +47,7 @@ func Prepare(sess *session.Session, imagePath string) error {
 	if err := cloneFile(imagePath, sess.RootDisk()); err != nil {
 		return fmt.Errorf("clone session disk: %w", err)
 	}
-	if err := sess.WriteGuestConfig(); err != nil {
+	if err := sess.WriteGuestConfig(model, secrets); err != nil {
 		return err
 	}
 	return writeConfigDisk(sess)
@@ -214,6 +214,59 @@ func (s *Sandbox) Call(ctx context.Context, method string, params any, result an
 		return nil
 	}
 	return json.Unmarshal(frame.Result, result)
+}
+
+func (s *Sandbox) UserTurn(ctx context.Context, text string, onEvent func(protocol.AgentEvent)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	id := fmt.Sprintf("%d", s.nextID)
+	raw, err := protocol.EncodeParams(protocol.UserTurnParams{Text: text})
+	if err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = s.conn.SetDeadline(deadline)
+		defer s.conn.SetDeadline(time.Time{})
+	}
+	if err := protocol.WriteFrame(s.conn, protocol.Frame{ID: id, Method: "user_turn", Params: raw}); err != nil {
+		return err
+	}
+	for {
+		frame, err := protocol.ReadFrame(s.conn)
+		if err != nil {
+			return err
+		}
+		if frame.Method == "agent_event" {
+			ev, err := protocol.DecodeParams[protocol.AgentEvent](frame.Params)
+			if err != nil {
+				return err
+			}
+			if onEvent != nil {
+				onEvent(ev)
+			}
+			continue
+		}
+		if frame.ID == id {
+			if frame.Error != nil {
+				return frame.Error
+			}
+			return nil
+		}
+	}
+}
+
+func (s *Sandbox) SetModel(ctx context.Context, model config.Model, secrets map[string]string) error {
+	return s.Call(ctx, "set_model", protocol.SetModelParams{
+		Model: protocol.GuestModel{
+			Name:          model.Name,
+			Provider:      model.Provider,
+			Model:         model.Model,
+			CredentialEnv: model.CredentialEnv,
+			BaseURL:       model.BaseURL,
+		},
+		Secrets: secrets,
+	}, nil)
 }
 
 func (s *Sandbox) TransferArchive(ctx context.Context, archive []byte) error {

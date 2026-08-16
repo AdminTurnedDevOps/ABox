@@ -33,8 +33,8 @@ func startVM(cfg VMMConfig) error {
 	if rc := C.krun_disable_implicit_vsock(id); rc < 0 {
 		return fmt.Errorf("krun_disable_implicit_vsock: %d", int(rc))
 	}
-	if rc := C.krun_add_vsock(id, 0); rc < 0 {
-		return fmt.Errorf("krun_add_vsock(0): %d", int(rc))
+	if rc := C.krun_add_vsock(id, C.KRUN_TSI_HIJACK_INET); rc < 0 {
+		return fmt.Errorf("krun_add_vsock(TSI_INET): %d", int(rc))
 	}
 
 	sock := C.CString(cfg.RPCSocket)
@@ -81,6 +81,7 @@ func startVM(cfg VMMConfig) error {
 		"LANG=C",
 		"TERM=dumb",
 		"TMPDIR=/tmp",
+		"SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
 	}
 	envp := make([]*C.char, 0, len(envVals)+1)
 	for _, e := range envVals {

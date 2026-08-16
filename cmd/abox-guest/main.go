@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AdminTurnedDevOps/ABox/internal/agent"
+	"github.com/AdminTurnedDevOps/ABox/internal/guest/egress"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 	"golang.org/x/sys/unix"
@@ -26,14 +29,19 @@ func main() {
 
 func run() error {
 	prepMounts()
+	if err := egress.ConfigureGuestResolver(); err != nil {
+		fmt.Fprintf(os.Stderr, "abox-guest: resolver: %v\n", err)
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
+	applySecrets(cfg.Secrets)
 	repo := tools.Repo{Root: cfg.RepoDir}
 	if err := os.MkdirAll(repo.Root, 0o755); err != nil {
 		return err
 	}
+	loop := &agent.Loop{Model: agent.ModelFromGuest(cfg.Model), Repo: repo}
 	conn, err := dialVsock(cfg.VsockPort)
 	if err != nil {
 		return fmt.Errorf("vsock: %w", err)
@@ -67,7 +75,13 @@ func run() error {
 			}
 			return err
 		}
-		resp := handle(repo, &archive, frame)
+		if frame.Method == "user_turn" {
+			if err := handleTurn(conn, loop, frame); err != nil {
+				return err
+			}
+			continue
+		}
+		resp := handle(loop, repo, &archive, frame)
 		if err := protocol.WriteFrame(conn, resp); err != nil {
 			return err
 		}
@@ -77,10 +91,43 @@ func run() error {
 	}
 }
 
-func handle(repo tools.Repo, archive *bytes.Buffer, req protocol.Frame) protocol.Frame {
+func handleTurn(conn net.Conn, loop *agent.Loop, req protocol.Frame) error {
+	p, err := protocol.DecodeParams[protocol.UserTurnParams](req.Params)
+	if err != nil {
+		return protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Error: &protocol.Error{Code: "guest", Message: err.Error()}})
+	}
+	loop.OnEvent = func(ev protocol.AgentEvent) {
+		raw, _ := protocol.EncodeParams(ev)
+		_ = protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Method: "agent_event", Params: raw})
+	}
+	if err := loop.Turn(context.Background(), p.Text); err != nil {
+		return protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Error: &protocol.Error{Code: "agent", Message: err.Error()}})
+	}
+	ok, _ := protocol.EncodeParams(map[string]bool{"ok": true})
+	return protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Result: ok})
+}
+
+func applySecrets(secrets map[string]string) {
+	for k, v := range secrets {
+		if k != "" && v != "" {
+			_ = os.Setenv(k, v)
+		}
+	}
+}
+
+func handle(loop *agent.Loop, repo tools.Repo, archive *bytes.Buffer, req protocol.Frame) protocol.Frame {
 	out := protocol.Frame{V: protocol.Version, ID: req.ID}
 	var err error
 	switch req.Method {
+	case "set_model":
+		p, e := protocol.DecodeParams[protocol.SetModelParams](req.Params)
+		if e != nil {
+			err = e
+			break
+		}
+		applySecrets(p.Secrets)
+		loop.Model = agent.ModelFromGuest(p.Model)
+		out.Result, _ = protocol.EncodeParams(map[string]bool{"ok": true})
 	case "list_files":
 		p, e := protocol.DecodeParams[protocol.ListFilesParams](req.Params)
 		if e != nil {

@@ -15,10 +15,18 @@ func TestBuiltinToolNames(t *testing.T) {
 	}
 }
 
-func TestNilSandboxDoesNotRunTools(t *testing.T) {
+func TestTurnRequiresGuestRepo(t *testing.T) {
 	l := &Loop{}
-	_, err := l.execTool(context.Background(), provider.Event{ToolName: "run_command", ToolArgs: `{"command":"id"}`})
-	if err == nil || !strings.Contains(err.Error(), "sandbox unavailable") {
+	err := l.Turn(context.Background(), "hi")
+	if err == nil || !strings.Contains(err.Error(), "microVM") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestExecUnknownTool(t *testing.T) {
+	l := &Loop{}
+	_, err := l.execTool(context.Background(), provider.Event{ToolName: "host_shell"})
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }

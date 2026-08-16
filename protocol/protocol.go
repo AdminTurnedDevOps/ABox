@@ -132,10 +132,37 @@ type SetTimeParams struct {
 }
 
 type GuestConfig struct {
-	SessionID  string `json:"session_id"`
-	Capability string `json:"capability"`
-	VsockPort  uint32 `json:"vsock_port"`
-	RepoDir    string `json:"repo_dir"`
+	SessionID  string            `json:"session_id"`
+	Capability string            `json:"capability"`
+	VsockPort  uint32            `json:"vsock_port"`
+	RepoDir    string            `json:"repo_dir"`
+	Model      GuestModel        `json:"model"`
+	Secrets    map[string]string `json:"secrets,omitempty"`
+}
+
+type GuestModel struct {
+	Name          string `json:"name"`
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	CredentialEnv string `json:"credential_env"`
+	BaseURL       string `json:"base_url,omitempty"`
+}
+
+type UserTurnParams struct {
+	Text string `json:"text"`
+}
+
+type AgentEvent struct {
+	Kind   string `json:"kind"`
+	Text   string `json:"text,omitempty"`
+	Tool   string `json:"tool,omitempty"`
+	Status string `json:"status,omitempty"`
+	Err    string `json:"err,omitempty"`
+}
+
+type SetModelParams struct {
+	Model   GuestModel        `json:"model"`
+	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
 func WriteFrame(w io.Writer, f Frame) error {

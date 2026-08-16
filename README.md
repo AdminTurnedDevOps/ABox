@@ -1,7 +1,7 @@
 # ABox
 
-Terminal-native coding-agent harness. Model-controlled tools run in a libkrun
-microVM, not on the host.
+Terminal-native coding-agent harness. The agent — prompts, model calls, and
+tools — runs inside a libkrun microVM. The host is the TUI and VMM.
 
 ![](img/aboxlogo.jpg)
 
@@ -41,7 +41,7 @@ abox
 - `enter` sends a prompt (`shift+enter` / `alt+enter` for a new line)
 - `/provider` sets Grok, OpenAI, or Anthropic API keys
 - `ctrl+c` quits
-- Tools run only inside the guest
+- The agent runs only inside the guest
 
 ## Test
 
