@@ -341,7 +341,7 @@ func (m model) View() tea.View {
 
 	composer := m.ta.View()
 	extra := ""
-	footer := muted.Render("/provider  ·  ctrl+c quit")
+	footer := ""
 	switch m.mode {
 	case modeProviderPick:
 		var b strings.Builder
@@ -358,10 +358,8 @@ func (m model) View() tea.View {
 			b.WriteString(mark + p.Label + "  " + status + "\n")
 		}
 		composer = b.String()
-		footer = muted.Render("enter select  ·  esc back")
 	case modeProviderKey:
 		composer = "API key for " + m.provPick.Label + "\n" + m.keyIn.View()
-		footer = muted.Render("enter save  ·  esc cancel  ·  key is not shown in the log")
 	default:
 		if m.showingSlash() {
 			var b strings.Builder
@@ -379,14 +377,15 @@ func (m model) View() tea.View {
 			extra = b.String()
 		}
 	}
-	if m.busy {
-		footer = muted.Render("running…  ctrl+c cancel")
-	}
 	if m.err != "" {
 		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("#B54A4A")).Render(m.err)
 	}
 
-	content := canvas.Render(strings.Join([]string{header, "", body, "", extra + composer, footer}, "\n"))
+	parts := []string{header, "", body, "", extra + composer}
+	if footer != "" {
+		parts = append(parts, footer)
+	}
+	content := canvas.Render(strings.Join(parts, "\n"))
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.BackgroundColor = lipgloss.Color("#050505")
