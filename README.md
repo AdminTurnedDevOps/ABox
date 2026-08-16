@@ -51,14 +51,14 @@ Send any prompt.
 
 Example:
 
-![](img/lol.jpg)
+![](img/lol.png)
 
 ## Choose Provider
 
 Currently, Grok, OpenAI, and Anthropic are supported.
 
-![](img/prov1.jpg)
-![](img/prov2.jpg)
+![](img/prov1.png)
+![](img/prov2.png)
 
 ## Without Key
 
