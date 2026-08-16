@@ -152,11 +152,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "text":
 			m.appendLast(msg.Text)
 		case "tool":
-			line := fmt.Sprintf("  ▸ %s %s", msg.Tool, msg.Status)
-			if msg.Text != "" && msg.Text != "null" {
-				line += "  " + msg.Text
-			}
-			m.log = append(m.log, line)
+			m.log = append(m.log, formatToolLine(msg.Tool, msg.Status, msg.Text, msg.Err))
 		case "error":
 			m.err = msg.Err
 			m.log = append(m.log, "error: "+msg.Err)
@@ -399,6 +395,19 @@ func (m model) View() tea.View {
 	v.AltScreen = true
 	v.BackgroundColor = lipgloss.Color("#050505")
 	return v
+}
+
+func formatToolLine(tool, status, text, errText string) string {
+	switch {
+	case status == "error" && errText != "":
+		return "  ▸ " + tool + " failed: " + errText
+	case tool == "search" && (text == "" || text == "no matches" || text == "null"):
+		return "  ▸ searched the guest repo (no files matched)"
+	case text == "" || text == "null":
+		return "  ▸ " + tool
+	default:
+		return "  ▸ " + tool + "  " + text
+	}
 }
 
 func wrapLog(lines []string, width int) []string {

@@ -64,7 +64,7 @@ abox
 
 Example:
 
-![](img/lol.png)
+![](img/test.png)
 
 ## Choose Provider
 
