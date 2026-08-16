@@ -3,7 +3,7 @@
 Terminal-native coding-agent harness. Model-controlled tools run in a libkrun
 microVM, not on the host.
 
-![](aboxlogo.png)
+![](logo/aboxlogo.jpg)
 
 **Status:** experimental. Isolation is **Planned** until hardware acceptance
 tests pass. This tree is a first runnable increment: TUI, fail-closed tools,
@@ -26,7 +26,9 @@ Confirm `kern.hv_support` is `1`.
 
 ## Quickstart
 
-From a **clean** Git worktree:
+From this repo (or any directory). If Git is missing, dirty, or has no
+commits, ABox copies the files into a private snapshot and leaves your
+host Git alone.
 
 ```bash
 make build

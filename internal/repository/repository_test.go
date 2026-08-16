@@ -38,6 +38,24 @@ func TestValidateClean(t *testing.T) {
 	}
 }
 
+func TestOpenForSessionEphemeral(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scratch := t.TempDir()
+	snap, err := OpenForSession(dir, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Ephemeral {
+		t.Fatal("expected ephemeral snapshot")
+	}
+	if _, err := os.Stat(filepath.Join(snap.Root, "hello.txt")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateCleanEmptyRepo(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command("git", "init", "-b", "main")

@@ -59,18 +59,25 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	snap, err := repository.ValidateClean(wd)
-	if err != nil {
-		return err
-	}
-
 	if err := os.MkdirAll(config.SessionRoot(), 0o700); err != nil {
 		return err
 	}
 
-	sess, err := session.Create(snap.Root, snap.HEAD)
+	sess, err := session.Create(wd, "pending")
 	if err != nil {
 		return err
+	}
+	snap, err := repository.OpenForSession(wd, filepath.Join(sess.Dir, "host-tree"))
+	if err != nil {
+		return err
+	}
+	sess.RepoRoot = snap.Root
+	sess.HEAD = snap.HEAD
+	if err := sess.WriteMeta(); err != nil {
+		return err
+	}
+	if snap.Ephemeral {
+		fmt.Fprintf(os.Stderr, "abox: no clean committed worktree; using an ephemeral snapshot. host git is unchanged.\n")
 	}
 
 	var sb *runtime.Sandbox
