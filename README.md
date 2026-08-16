@@ -3,7 +3,7 @@
 Terminal-native coding-agent harness. Model-controlled tools run in a libkrun
 microVM, not on the host.
 
-![](logo/aboxlogo.jpg)
+![](img/aboxlogo.jpg)
 
 **Status:** experimental. Isolation is **Planned** until hardware acceptance
 tests pass. This tree is a first runnable increment: TUI, fail-closed tools,
@@ -38,9 +38,29 @@ export XAI_API_KEY=...          # or OPENAI_API_KEY / ANTHROPIC_API_KEY
 abox
 ```
 
-- `ctrl+j` sends a prompt
+- `enter` sends a prompt (`shift+enter` / `alt+enter` for a new line)
+- `/provider` sets Grok, OpenAI, or Anthropic API keys
 - `ctrl+c` quits
 - Tools run only inside the guest
+
+## Test
+
+Open `abox`
+
+Send any prompt.
+
+Example:
+
+![](img/lol.jpg)
+
+## Choose Provider
+
+Currently, Grok, OpenAI, and Anthropic are supported.
+
+![](img/prov1.jpg)
+![](img/prov2.jpg)
+
+## Without Key
 
 Prove the microVM without a model key:
 

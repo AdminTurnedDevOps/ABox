@@ -12,6 +12,7 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/agent"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
+	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
 	"github.com/AdminTurnedDevOps/ABox/internal/repository"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
 	"github.com/AdminTurnedDevOps/ABox/internal/session"
@@ -48,6 +49,9 @@ func run() error {
 
 	cfg, cfgPath, err := config.Load()
 	if err != nil {
+		return err
+	}
+	if err := credentials.ApplyToEnv(); err != nil {
 		return err
 	}
 	sel, ok := cfg.ModelNamed(*modelName)
