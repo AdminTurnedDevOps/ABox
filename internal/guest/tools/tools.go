@@ -143,10 +143,16 @@ func (r Repo) Search(query, rel string, limit int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var matches []string
+	matches := make([]string, 0)
 	err = filepath.WalkDir(start, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		relPath, _ := filepath.Rel(r.Root, path)
 		nameHit := strings.Contains(strings.ToLower(d.Name()), strings.ToLower(query))

@@ -139,6 +139,9 @@ func (l *Loop) execTool(ctx context.Context, ev provider.Event) (string, error) 
 		if err != nil {
 			return "", err
 		}
+		if len(matches) == 0 {
+			return "no matches", nil
+		}
 		b, _ := json.Marshal(matches)
 		return string(b), nil
 	case "apply_patch":

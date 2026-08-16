@@ -152,7 +152,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "text":
 			m.appendLast(msg.Text)
 		case "tool":
-			m.log = append(m.log, fmt.Sprintf("  ▸ %s %s %s", msg.Tool, msg.Status, msg.Text))
+			line := fmt.Sprintf("  ▸ %s %s", msg.Tool, msg.Status)
+			if msg.Text != "" && msg.Text != "null" {
+				line += "  " + msg.Text
+			}
+			m.log = append(m.log, line)
 		case "error":
 			m.err = msg.Err
 			m.log = append(m.log, "error: "+msg.Err)
