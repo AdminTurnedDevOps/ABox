@@ -1,7 +1,7 @@
 # ABox
 
-Terminal-native coding-agent harness. The agent — prompts, model calls, and
-tools — runs inside a libkrun microVM. The host is the TUI and VMM.
+Terminal-native coding-agent harness. The agent, prompts, model calls, and
+tools runs inside a libkrun microVM. The host is the TUI and VMM.
 
 <p align="center">
   <img src="img/aboxlogo.jpg" alt="ABox" width="520">
