@@ -152,6 +152,42 @@ Open the TUI without a VM. The agent will not run; `/provider` still works:
 abox --no-vm
 ```
 
+## Why?
+
+A few reasons...
+
+First, why not just use the Docker Sandbox?
+
+The thought of "why not just use Docker Sandbox instead?" came to mind when I was building this out.
+
+Here are a few reasons why:
+
+It spins up the Docker engine inside of the sandbox vs just using microvm
+Its not a harness or an Agent, its the infrastructure runtime layer
+You'd put your agent harness INSIDE of the Docker Agent
+When thinking about these things, I began to imagine the constraint on resources locally and the extra hops it would take to hit your actual Agent vs having a Harness thats sandboxed-out-of-the-box (that sounds cool... I'll have to steal it from myself).
+
+These aren't inherently "bad things". I'm just thinking to myself as I'm building out the solution "I want to be as close to the MicroVM as possible. I don't want additional hops where things can break out and go wrong. I want isolation at its purest form".
+
+Second, why Go?
+
+If you look at Harnesses, they're written in a few different languages:
+
+- Go
+- TS
+- Rust
+
+and when thinking about what language to write a Harness in, you should think about:
+
+- Harness is I/O-bound glue. Every meaningful latency cost is the model generating tokens over the wire. Whether your event loop dispatches a tool call in 5ms or 50ms is invisible next to a 4-second streaming response
+- Distribution of the Harness. A Go or Rust binary means no runtime, no version conflicts, and it drops cleanly into containers, CI runners, and locked-down environments.
+- Startup time
+- Concurrency for paralell sub-agents
+- Fast startup that doesn't undo Firecracker's boot time.
+- Goroutines that fit process supervision and fan-out across VMs.
+
+Because of the above, Go or Rust are naturally great languages. Because I like Go, I went with Go. No other reason as it would've been perfectly suitable in Rust. I might even have an Agent do a Rust version for comparison at some point.
+
 ## What is not done yet
 
 MCP, compaction, checkpoint/rollback/fork, agentgateway, and resource
