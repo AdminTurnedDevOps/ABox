@@ -77,19 +77,76 @@ Currently, Grok, OpenAI, and Anthropic are supported.
 
 ## Test MicroVM Connectivity
 
-Prove the MicroVM is up and operational with or without an LLM key:
+Prove the MicroVM is up without an LLM key (boots the guest and lists files):
 
 ```bash
 abox --probe-vm
 ```
 
-Headless agent loop:
+You'll see an output similar to the below from the guest disk via `list_files` over `vsock` (virtual socket between the host and the guest/MicroVM)
+
+```
+❯ abox --probe-vm
+guest ready; files:
+.git
+.git/COMMIT_EDITMSG
+.git/HEAD
+.git/branches
+.git/config
+.git/description
+.git/hooks
+.git/hooks/applypatch-msg.sample
+.git/hooks/commit-msg.sample
+.git/hooks/post-update.sample
+.git/hooks/pre-applypatch.sample
+.git/hooks/pre-commit.sample
+.git/hooks/pre-merge-commit.sample
+.git/hooks/pre-push.sample
+.git/hooks/pre-rebase.sample
+.git/hooks/pre-receive.sample
+.git/hooks/prepare-commit-msg.sample
+.git/hooks/push-to-checkout.sample
+.git/hooks/sendemail-validate.sample
+.git/hooks/update.sample
+.git/index
+.git/info
+.git/info/exclude
+.git/logs
+.git/logs/HEAD
+.git/logs/refs
+.git/logs/refs/heads
+.git/objects
+.git/objects/00
+.git/objects/00/e0123951d8bb668e109e33b4df3415b2cfdb90
+.git/objects/03
+.git/objects/03/3b6a40f1400fe5d2998486dc2be99e08c31820
+.git/objects/04
+.git/objects/04/0f99ac609f8a6e9b85905747542db5f56d6dcc
+.git/objects/0e
+.git/objects/0e/8d0f06e0cab265dfd884b7b5ebb4caaffdc0cf
+.git/objects/0e/ef0707995b2673d37f94d03334e54332408ada
+.git/objects/0f
+.git/objects/0f/562f65d5ec3c4323fab8f9acfe711044394fcc
+.git/objects/13
+.git/objects/13/deeea53575596cb72d6e121741dd1354760c2c
+.git/objects/13/f6342f8ded5877c8e174fb0a90a1a5038799ad
+.git/objects/19
+.git/objects/19/4c7e69fab6609d2b65378a27f2f4c1aa8eaade
+.git/objects/19/e57d672990c73b0f2e80c68d6f9e970c6bfe7d
+.git/objects/1a
+.git/objects/1a/9d23508b4ff4c817893fc191fdbcb91eb2a456
+.git/objects/1e
+.git/objects/1e/c66cc8956194fe8feedbb4915fb9ea45ec8c9d
+.git/objects/20
+```
+
+Headless agent loop (needs a VM and a provider key; the prompt is sent to the guest agent):
 
 ```bash
 abox exec --prompt "list the repository files"
 ```
 
-Skip the VM (tools fail closed; useful for UI-only checks):
+Open the TUI without a VM. The agent will not run; `/provider` still works:
 
 ```bash
 abox --no-vm
