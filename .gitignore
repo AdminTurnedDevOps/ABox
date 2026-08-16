@@ -1,0 +1,8 @@
+/bin/
+/var/
+/dist/
+*.raw
+*.img
+.DS_Store
+debug.log
+coverage.out
