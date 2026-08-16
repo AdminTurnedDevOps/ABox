@@ -75,9 +75,9 @@ Currently, Grok, OpenAI, and Anthropic are supported.
 ![](img/prov1.png)
 ![](img/prov2.png)
 
-## Without Key
+## Test MicroVM Connectivity
 
-Prove the microVM without a model key:
+Prove the MicroVM is up and operational with or without an LLM key:
 
 ```bash
 abox --probe-vm
