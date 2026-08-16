@@ -3,7 +3,22 @@
 Terminal-native coding-agent harness. The agent — prompts, model calls, and
 tools — runs inside a libkrun microVM. The host is the TUI and VMM.
 
-![](img/aboxlogo.jpg)
+<p align="center">
+  <img src="img/aboxlogo.jpg" alt="ABox" width="280">
+</p>
+
+<p align="center">
+  <a href="https://github.com/AdminTurnedDevOps/ABox/stargazers"><img src="https://img.shields.io/github/stars/AdminTurnedDevOps/ABox?style=flat&label=Stars" alt="Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="https://github.com/AdminTurnedDevOps/ABox"><img src="https://img.shields.io/github/go-mod/go-version/AdminTurnedDevOps/ABox?label=Go" alt="Go"></a>
+  <a href="PLAN.md"><img src="https://img.shields.io/badge/Status-experimental-yellow" alt="Status"></a>
+</p>
+
+<p align="center">
+  <a href="#quickstart">Quick Start</a> ·
+  <a href="PLAN.md">Plan</a> ·
+  <a href="LICENSE">License</a>
+</p>
 
 **Status:** experimental. Isolation is **Planned** until hardware acceptance
 tests pass. Runnable today: guest agent (prompt, model call, tools) in a
