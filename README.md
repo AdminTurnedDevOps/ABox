@@ -6,8 +6,8 @@ tools — runs inside a libkrun microVM. The host is the TUI and VMM.
 ![](img/aboxlogo.jpg)
 
 **Status:** experimental. Isolation is **Planned** until hardware acceptance
-tests pass. This tree is a first runnable increment: TUI, fail-closed tools,
-and a real libkrun boot path on Apple Silicon.
+tests pass. Runnable today: guest agent (prompt, model call, tools) in a
+libkrun microVM on Apple Silicon, plus TUI and `/provider`.
 
 ## Prerequisites
 
