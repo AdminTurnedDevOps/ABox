@@ -39,6 +39,21 @@ brew install libkrun libkrunfw
 
 Confirm `kern.hv_support` is `1`.
 
+## MicroVM, not Docker
+
+`abox` does not run the agent in Docker. A session is a **libkrun microVM**:
+a Linux kernel and `abox-guest` on Apple Hypervisor.framework. The guest
+repo is a copy of your files on that VM disk, not a container mount.
+
+Docker is used only when you pack the guest disk (`make image` /
+`make image-update`). After that, ABox boots the raw image with libkrun.
+No Docker daemon is on the session path.
+
+| Step | What runs |
+| --- | --- |
+| `make image` | Docker, to build the guest disk |
+| `abox` / `--probe-vm` | `abox` + `abox-vmm` + libkrun VM |
+
 ## Quickstart
 
 From this repo (or any directory). If Git is missing, dirty, or has no
