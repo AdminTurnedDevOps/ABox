@@ -3,7 +3,7 @@
 Terminal-native coding-agent harness. Model-controlled tools run in a libkrun
 microVM, not on the host.
 
-![](aboxlogo.png)
+![](./aboxlogo.png)
 
 **Status:** experimental. Isolation is **Planned** until hardware acceptance
 tests pass. This tree is a first runnable increment: TUI, fail-closed tools,
