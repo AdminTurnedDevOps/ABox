@@ -60,6 +60,14 @@ From this repo (or any directory). If Git is missing, dirty, or has no
 commits, ABox copies the files into a private snapshot and leaves your
 host Git alone.
 
+`make image`: uses Docker once to pack a raw Alpine disk (`~/Library/Caches/ABox/images/abox-guest.raw`): base OS, git, patch, and abox-guest. Needed the first time, or when you want a full disk rebuild. Depends on make guest.
+
+make build compiles the three binaries into bin/:
+
+• `abox`: host TUI
+• abox-vmm: libkrun helper (codesigned for Hypervisor.framework)
+• abox-guest-linux-arm64: Linux agent, built for the VM (GOOS=linux GOARCH=arm64)
+
 ```bash
 make build
 make image
