@@ -54,13 +54,25 @@ No Docker daemon is on the session path.
 | `make image` | Docker, to build the guest disk |
 | `abox` / `--probe-vm` | `abox` + `abox-vmm` + libkrun VM |
 
+`~/Library/Caches/ABox/images/abox-guest.raw` is the **base guest disk**
+(Alpine + git + `abox-guest`). Think of it like the MicroVMs golden hard-drive image. Sessions do not boot that file read/write.
+On start, ABox clones it (APFS copy-on-write when available) to:
+
+`~/Library/Application Support/ABox/sessions/<session-id>/root.raw`
+
+The microVM attaches that session disk. Repo snapshot and agent work land
+there. The cache image stays the clean template for the next session.
+
+Each session also gets a small read-only `config.raw` (session id,
+capability, model, keys). That is not the OS disk.
+
 ## Quickstart
 
 From this repo (or any directory). If Git is missing, dirty, or has no
 commits, ABox copies the files into a private snapshot and leaves your
 host Git alone.
 
-`make image`: uses Docker once to pack a raw Alpine disk (`~/Library/Caches/ABox/images/abox-guest.raw`): base OS, git, patch, and abox-guest. Needed the first time, or when you want a full disk rebuild. Depends on make guest.
+`make image`: uses Docker once to pack a raw Alpine disk (`~/Library/Caches/ABox/images/abox-guest.raw`): base OS, git, patch, and abox-guest. Needed the first time, or when you want a full disk rebuild. Depends on `make guest`.
 
 `make build` compiles the three binaries into bin/:
 - `abox`: host TUI
