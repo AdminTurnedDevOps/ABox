@@ -223,11 +223,6 @@ and when thinking about what language to write a Harness in, you should think ab
 
 Because of the above, Go or Rust are naturally great languages. Because I like Go, I went with Go. No other reason as it would've been perfectly suitable in Rust. I might even have an Agent do a Rust version for comparison at some point.
 
-## What is not done yet
-
-MCP, compaction, checkpoint/rollback/fork, agentgateway, and resource
-acceptance. See `PLAN.md`.
-
 ## Security
 
 Do not describe this build as verified isolation. The device plan is
