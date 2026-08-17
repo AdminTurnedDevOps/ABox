@@ -39,7 +39,7 @@ brew install libkrun libkrunfw
 
 Confirm `kern.hv_support` is `1`.
 
-## MicroVM, not Docker
+## MicroVM > Docker
 
 `abox` does not run the agent in Docker. A session is a **libkrun microVM**:
 a Linux kernel and `abox-guest` on Apple Hypervisor.framework. The guest
