@@ -39,7 +39,7 @@ brew install libkrun libkrunfw
 
 Confirm `kern.hv_support` is `1`.
 
-## MicroVM > Docker
+## microVM > Docker
 
 `abox` does not run the agent in Docker. A session is a **libkrun microVM**:
 a Linux kernel and `abox-guest` on Apple Hypervisor.framework. The guest
@@ -55,7 +55,7 @@ No Docker daemon is on the session path.
 | `abox` / `--probe-vm` | `abox` + `abox-vmm` + libkrun VM |
 
 `~/Library/Caches/ABox/images/abox-guest.raw` is the **base guest disk**
-(Alpine + git + `abox-guest`). Think of it like the MicroVMs golden hard-drive image. Sessions do not boot that file read/write.
+(Alpine + git + `abox-guest`). Think of it like the microVMs golden hard-drive image. Sessions do not boot that file read/write.
 On start, ABox clones it (APFS copy-on-write when available) to:
 
 `~/Library/Application Support/ABox/sessions/<session-id>/root.raw`
@@ -72,7 +72,7 @@ From this repo (or any directory). If Git is missing, dirty, or has no
 commits, ABox copies the files into a private snapshot and leaves your
 host Git alone.
 
-`make image`: uses Docker once to pack a raw Alpine disk (`~/Library/Caches/ABox/images/abox-guest.raw`): base OS, git, patch, and abox-guest. Needed the first time, or when you want a full disk rebuild. Depends on `make guest`.
+`make image`: uses Docker once to pack a raw Alpine disk (`~/Library/Caches/ABox/images/abox-guest.raw` - the golden HD): base OS, git, patch, and abox-guest. Needed the first time, or when you want a full disk rebuild. Depends on `make guest`.
 
 `make build` compiles the three binaries into bin/:
 - `abox`: host TUI
