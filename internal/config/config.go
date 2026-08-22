@@ -105,8 +105,11 @@ func EnsureLayout() error {
 	if err := os.MkdirAll(SessionRoot(), 0o700); err != nil {
 		return fmt.Errorf("create sessions dir: %w", err)
 	}
-	if err := os.MkdirAll(ImageDir(), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(Dir(), "images"), 0o700); err != nil {
 		return fmt.Errorf("create images dir: %w", err)
+	}
+	if err := seedFromLegacy(); err != nil {
+		return err
 	}
 	path := Path()
 	if exists(path) {
@@ -118,6 +121,32 @@ func EnsureLayout() error {
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func seedFromLegacy() error {
+	home := homeDir()
+	if home == "" {
+		return nil
+	}
+	legacy := filepath.Join(home, "Library", "Application Support", "ABox")
+	for _, name := range []string{"config.yaml", "credentials.env"} {
+		dst := filepath.Join(Dir(), name)
+		if exists(dst) {
+			continue
+		}
+		src := filepath.Join(legacy, name)
+		data, err := os.ReadFile(src)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return fmt.Errorf("seed %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -230,6 +259,65 @@ func (c File) ResolvedMCPServers() ([]MCPServer, error) {
 	return c.MCPServers, nil
 }
 
+// AddMCPServer records a Streamable HTTP MCP server and sets connectivity.mode.
+// mode must be "direct" or "agentgateway". Same name upserts. Agentgateway
+// with required enforcement keeps exactly one origin.
+func (c *File) AddMCPServer(mode string, srv MCPServer) error {
+	switch mode {
+	case "direct", "agentgateway":
+	default:
+		return fmt.Errorf("mode must be direct or agentgateway")
+	}
+	if err := srv.validate(); err != nil {
+		return err
+	}
+	c.Connectivity.Mode = mode
+	if mode == "agentgateway" {
+		if c.Connectivity.Enforcement == "" {
+			c.Connectivity.Enforcement = "required"
+		}
+		if c.Connectivity.Enforcement == "required" {
+			for _, existing := range c.MCPServers {
+				if existing.Name != srv.Name {
+					return fmt.Errorf("agentgateway required allows exactly one mcp_servers entry (already have %q)", existing.Name)
+				}
+			}
+			c.MCPServers = []MCPServer{srv}
+			return c.Validate()
+		}
+	}
+	for i, existing := range c.MCPServers {
+		if existing.Name == srv.Name {
+			c.MCPServers[i] = srv
+			return c.Validate()
+		}
+	}
+	c.MCPServers = append(c.MCPServers, srv)
+	return c.Validate()
+}
+
+func (c File) Save() error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if err := EnsureLayout(); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	path := Path()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
 func TokenEnv(server MCPServer) string {
 	if server.CredentialEnv != "" {
 		return server.CredentialEnv
@@ -274,9 +362,7 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// Dir is ~/.abox, matching other CLI harnesses. ABOX_HOME overrides.
-// If ~/.abox does not exist yet but the old macOS Application Support
-// tree does, that legacy path is used so existing installs keep working.
+// Dir is always ~/.abox unless ABOX_HOME is set. First run creates it.
 func Dir() string {
 	if override := strings.TrimSpace(os.Getenv("ABOX_HOME")); override != "" {
 		return override
@@ -285,15 +371,7 @@ func Dir() string {
 	if home == "" {
 		return filepath.Join(".", "var", "abox")
 	}
-	modern := filepath.Join(home, ".abox")
-	legacy := filepath.Join(home, "Library", "Application Support", "ABox")
-	if exists(modern) {
-		return modern
-	}
-	if exists(legacy) {
-		return legacy
-	}
-	return modern
+	return filepath.Join(home, ".abox")
 }
 
 func AppSupportDir() string { return Dir() }
@@ -304,13 +382,13 @@ func CacheDir() string {
 
 func ImageDir() string {
 	modern := filepath.Join(Dir(), "images")
-	if exists(modern) {
+	if exists(filepath.Join(modern, "abox-guest.raw")) {
 		return modern
 	}
 	home := homeDir()
 	if home != "" {
 		legacy := filepath.Join(home, "Library", "Caches", "ABox", "images")
-		if exists(legacy) {
+		if exists(filepath.Join(legacy, "abox-guest.raw")) {
 			return legacy
 		}
 	}

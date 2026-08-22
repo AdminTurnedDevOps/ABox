@@ -209,6 +209,18 @@ type StreamableClientTransport struct {
 
 Config lives at `~/.abox/config.yaml` (same pattern as `~/.claude`, `~/.codex`). First `abox` run creates `~/.abox/` (mode 0700) and a default `config.yaml` if they are missing. Credentials are `~/.abox/credentials.env`.
 
+Add a Streamable HTTP server without editing YAML by hand. `--mode` is required:
+
+```bash
+# Direct: ABox dials the server. Token optional.
+abox mcp add --mode direct --credential-env GITHUB_MCP_TOKEN github https://api.githubcopilot.com/mcp/
+
+# Agentgateway: ABox dials the gateway only. No token; auth is on the gateway.
+abox mcp add --mode agentgateway agw https://agw.example/mcp
+```
+
+`abox mcp login <name>` runs host OAuth (or saves a PAT) for a server that already exists in config. `/mcp` in the TUI pastes a Bearer for a configured server.
+
 One guest client. Every remote MCP is a Streamable HTTP `url`. Direct GitHub and an agentgateway virtual MCP are the same field; only `connectivity.mode` changes the policy. `credential_env` is optional (omit when the server needs no Bearer).
 
 - `direct` — guest may dial every `mcp_servers` URL.
@@ -295,7 +307,6 @@ acceptance. See `PLAN.md`. Streamable HTTP MCP is in; isolation stays Planned.
 Do not describe this build as verified isolation. The device plan is
 allowlisted (no guest NIC, no host-path virtio-fs, TSI flags zero). Claims
 stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
-
 ## Whats Currently In Place
 
 ```
