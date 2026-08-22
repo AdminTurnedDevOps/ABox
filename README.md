@@ -1,7 +1,8 @@
 # ABox
 
-Terminal-native coding-agent harness. The agent, prompts, model calls, and
-tools runs inside a libkrun microVM. The host is the TUI and VMM.
+An always-on, isolated agent harness.
+
+The agent, prompts, model calls, and tools runs in isolation.
 
 <p align="center">
   <img src="img/aboxlogo.jpg" alt="ABox" width="520">
@@ -20,8 +21,9 @@ tools runs inside a libkrun microVM. The host is the TUI and VMM.
   <a href="LICENSE">License</a>
 </p>
 
-**Status:** experimental. Isolation is **Planned** until hardware acceptance
-tests pass. Runnable today: guest agent (prompt, model call, tools) in a
+Right now, the industry is incredibly focused on agent sandboxes for production (servers, cloud, Kubernetes, etc), but the biggest security entry point are agents running locally on someone’s laptop.
+
+**Status:** experimental. Runnable today: guest agent (prompt, model call, tools) in a
 libkrun microVM on Apple Silicon, plus TUI and `/provider`.
 
 ## Prerequisites
@@ -283,6 +285,7 @@ and when thinking about what language to write a Harness in, you should think ab
 
 Because of the above, Go or Rust are naturally great languages. Because I like Go, I went with Go. No other reason as it would've been perfectly suitable in Rust. I might even have an Agent do a Rust version for comparison at some point.
 
+<<<<<<< HEAD
 ## What is not done yet
 
 Compaction, checkpoint/rollback/fork, stdio MCP, host broker, and resource
@@ -294,6 +297,8 @@ Do not describe this build as verified isolation. The device plan is
 allowlisted (no guest NIC, no host-path virtio-fs, TSI flags zero). Claims
 stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
 
+=======
+>>>>>>> 6cedf71a1b349b246aea20d467b0851db8030a45
 ## Whats Currently In Place
 
 ```
