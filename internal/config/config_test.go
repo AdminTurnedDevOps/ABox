@@ -34,6 +34,51 @@ func TestDirUsesDotAbox(t *testing.T) {
 	}
 }
 
+func TestDirIgnoresLegacyApplicationSupport(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ABOX_HOME", "")
+	legacy := filepath.Join(home, "Library", "Application Support", "ABox")
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "config.yaml"), []byte("connectivity:\n  mode: direct\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := Dir()
+	want := filepath.Join(home, ".abox")
+	if got != want {
+		t.Fatalf("Dir()=%q want %q", got, want)
+	}
+}
+
+func TestEnsureLayoutSeedsLegacyConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ABOX_HOME", "")
+	legacy := filepath.Join(home, "Library", "Application Support", "ABox")
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("connectivity:\n  mode: offline\n")
+	if err := os.WriteFile(filepath.Join(legacy, "config.yaml"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(filepath.Join(home, ".abox")) {
+		t.Fatal("expected ~/.abox")
+	}
+	got, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestDirRespectsABOX_HOME(t *testing.T) {
 	override := t.TempDir()
 	t.Setenv("ABOX_HOME", override)

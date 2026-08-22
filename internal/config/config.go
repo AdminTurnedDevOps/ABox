@@ -105,8 +105,11 @@ func EnsureLayout() error {
 	if err := os.MkdirAll(SessionRoot(), 0o700); err != nil {
 		return fmt.Errorf("create sessions dir: %w", err)
 	}
-	if err := os.MkdirAll(ImageDir(), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(Dir(), "images"), 0o700); err != nil {
 		return fmt.Errorf("create images dir: %w", err)
+	}
+	if err := seedFromLegacy(); err != nil {
+		return err
 	}
 	path := Path()
 	if exists(path) {
@@ -118,6 +121,32 @@ func EnsureLayout() error {
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func seedFromLegacy() error {
+	home := homeDir()
+	if home == "" {
+		return nil
+	}
+	legacy := filepath.Join(home, "Library", "Application Support", "ABox")
+	for _, name := range []string{"config.yaml", "credentials.env"} {
+		dst := filepath.Join(Dir(), name)
+		if exists(dst) {
+			continue
+		}
+		src := filepath.Join(legacy, name)
+		data, err := os.ReadFile(src)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return fmt.Errorf("seed %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -333,9 +362,7 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// Dir is ~/.abox, matching other CLI harnesses. ABOX_HOME overrides.
-// If ~/.abox does not exist yet but the old macOS Application Support
-// tree does, that legacy path is used so existing installs keep working.
+// Dir is always ~/.abox unless ABOX_HOME is set. First run creates it.
 func Dir() string {
 	if override := strings.TrimSpace(os.Getenv("ABOX_HOME")); override != "" {
 		return override
@@ -344,15 +371,7 @@ func Dir() string {
 	if home == "" {
 		return filepath.Join(".", "var", "abox")
 	}
-	modern := filepath.Join(home, ".abox")
-	legacy := filepath.Join(home, "Library", "Application Support", "ABox")
-	if exists(modern) {
-		return modern
-	}
-	if exists(legacy) {
-		return legacy
-	}
-	return modern
+	return filepath.Join(home, ".abox")
 }
 
 func AppSupportDir() string { return Dir() }
@@ -363,13 +382,13 @@ func CacheDir() string {
 
 func ImageDir() string {
 	modern := filepath.Join(Dir(), "images")
-	if exists(modern) {
+	if exists(filepath.Join(modern, "abox-guest.raw")) {
 		return modern
 	}
 	home := homeDir()
 	if home != "" {
 		legacy := filepath.Join(home, "Library", "Caches", "ABox", "images")
-		if exists(legacy) {
+		if exists(filepath.Join(legacy, "abox-guest.raw")) {
 			return legacy
 		}
 	}
