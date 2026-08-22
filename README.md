@@ -221,6 +221,8 @@ models:
     base_url: https://api.anthropic.com
 ```
 
+^ Sidenote: Remember to go into `~/.abox/config.yaml` and set the LLMs that you want to use per provider.
+
 Pick one in the TUI with `/provider`, or pass `--model grok-default` (and the other profile names) on `abox` / `abox exec`. Missing `XAI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` fails the turn, not VM boot (`abox --probe-vm` still works).
 
 Guest egress is allowlisted: `api.x.ai`, `api.openai.com`, `api.anthropic.com` on HTTPS `:443` only. Those sockets leave via libkrun TSI inet (no guest NIC). Isolation is still **Planned**. A compromised guest can read the key on `config.raw`; the allowlist is ABox’s Go dialer, not a VMM guarantee.
