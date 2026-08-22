@@ -325,7 +325,7 @@ stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
 
 ## Whats Left To Do
 
-Harness (PLAN §1 / §12)
+Harness
 • Context accounting and compaction
 • AGENTS.md / skills
 • Persistent sessions, resume, inspectable memory
