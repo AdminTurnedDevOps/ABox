@@ -297,6 +297,16 @@ and when thinking about what language to write a Harness in, you should think ab
 
 Because of the above, Go or Rust are naturally great languages. Because I like Go, I went with Go. No other reason as it would've been perfectly suitable in Rust. I might even have an Agent do a Rust version for comparison at some point.
 
+## What is not done yet
+
+Compaction, checkpoint/rollback/fork, stdio MCP, host broker, and resource
+acceptance. See `PLAN.md`. Streamable HTTP MCP is in; isolation stays Planned.
+
+## Security
+
+Do not describe this build as verified isolation. The device plan is
+allowlisted (no guest NIC, no host-path virtio-fs, TSI flags zero). Claims
+stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
 ## Whats Currently In Place
 
 ```
