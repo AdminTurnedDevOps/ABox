@@ -175,6 +175,10 @@ guest ready; files:
 .git/objects/20
 ```
 
+If you try to use ABox without a guest/microVM, you will see the following:
+
+![](img/novm.png)
+
 Headless agent loop (needs a VM and a provider key; the prompt is sent to the guest agent):
 
 ```bash
