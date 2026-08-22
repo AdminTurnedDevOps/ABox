@@ -187,6 +187,46 @@ abox exec --prompt "list the repository files"
 
 ## LLM Integration
 
+ABox is an LLM **client/harness**. The model loop/context is not on the host (your ABox instance/harness running on your computer). Prompts, streaming, tool calls, and provider HTTPS all run inside `abox-guest` in the microVM. The host TUI forwards your text over vsock (`user_turn`) and renders `agent_event` frames. That is the same isolation idea as MCP: the sandbox is the trust boundary for anything the model sees or starts.
+
+```go
+func Stream(ctx context.Context, model config.Model, messages []Message, tools []ToolSchema) (<-chan Event, error)
+```
+
+`Stream` talks to one configured profile. xAI and OpenAI use Chat Completions (`/chat/completions`). Anthropic uses Messages (`/v1/messages`). Provider-side shell, code execution, and file tools stay off. The model only sees ABox’s five guest tools plus any MCP tools discovered in the guest.
+
+![](img/prov1.png)
+![](img/prov2.png)
+
+Config lives at `~/.abox/config.yaml`. Keys are **not** stored in that file. `/provider` in the TUI writes `~/.abox/credentials.env` (mode 0600) and copies the value onto the sealed guest `config.raw` disk so the microVM can dial the API. Same as direct-mode MCP: the token has to live in the guest because the guest makes the HTTPS call.
+
+Default profiles:
+
+```yaml
+models:
+  - name: grok-default
+    provider: xai
+    model: grok-4
+    credential_env: XAI_API_KEY
+    base_url: https://api.x.ai/v1
+  - name: openai-default
+    provider: openai
+    model: gpt-4.1
+    credential_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+  - name: claude-default
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    credential_env: ANTHROPIC_API_KEY
+    base_url: https://api.anthropic.com
+```
+
+Pick one in the TUI with `/provider`, or pass `--model grok-default` (and the other profile names) on `abox` / `abox exec`. Missing `XAI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` fails the turn, not VM boot (`abox --probe-vm` still works).
+
+Guest egress is allowlisted: `api.x.ai`, `api.openai.com`, `api.anthropic.com` on HTTPS `:443` only. Those sockets leave via libkrun TSI inet (no guest NIC). Isolation is still **Planned**. A compromised guest can read the key on `config.raw`; the allowlist is ABox’s Go dialer, not a VMM guarantee.
+
+LLM traffic does **not** take the MCP `connectivity.mode` path. Direct vs agentgateway today applies to MCP servers. The model client always hits the provider `base_url` above.
+
 ## MCP Integration
 
 ABox is an MCP **client**. Remote tools are Streamable HTTP. Stdio MCP is not implemented.
