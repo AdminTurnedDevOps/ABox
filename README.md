@@ -337,12 +337,6 @@ Harness
 • Approval workflows (run_command and MCP should prompt; they do not)
 • Patch review TUI and host import (export exists in guest; no review/import)
 
-MCP and connectivity
-• Stdio MCP, host byte-broker, origin-rewrite
-• CIMD / client-credentials OAuth
-• MCP resources, prompts, elicitation
-• Per-tool approval UI
-
 Runtime
 • Cold checkpoint, rollback, fork (quiesce ioctl exists; no lineage/UI)
 • Idle-stop / resume / preserve
