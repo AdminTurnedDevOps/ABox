@@ -33,7 +33,7 @@ docker run --rm --privileged \
     mkdir -p /rootfs/usr/local/bin /rootfs/work/repo /rootfs/tmp /rootfs/abox-config
     cp /in/abox-guest /rootfs/usr/local/bin/abox-guest
     chmod 0755 /rootfs/usr/local/bin/abox-guest
-    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions ndots:1\n' > /rootfs/etc/resolv.conf
+    printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions ndots:1\n" > /rootfs/etc/resolv.conf
     rm -f /out/abox-guest.raw
     dd if=/dev/zero of=/out/abox-guest.raw bs=1M count=768 status=none
     mkfs.ext4 -F -q /out/abox-guest.raw
