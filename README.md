@@ -181,12 +181,6 @@ Headless agent loop (needs a VM and a provider key; the prompt is sent to the gu
 abox exec --prompt "list the repository files"
 ```
 
-Open the TUI without a VM. The agent will not run; `/provider` still works:
-
-```bash
-abox --no-vm
-```
-
 ## LLM Integration
 
 ## MCP Integration
