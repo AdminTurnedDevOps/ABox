@@ -23,8 +23,7 @@ The agent, prompts, model calls, and tools runs in isolation.
 
 Right now, the industry is incredibly focused on agent sandboxes for production (servers, cloud, Kubernetes, etc), but the biggest security entry point are agents running locally on someone’s laptop.
 
-**Status:** experimental. Isolation is **Planned** until hardware acceptance
-tests pass. Runnable today: guest agent (prompt, model call, tools) in a
+**Status:** experimental. Runnable today: guest agent (prompt, model call, tools) in a
 libkrun microVM on Apple Silicon, plus TUI and `/provider`.
 
 ## Prerequisites
