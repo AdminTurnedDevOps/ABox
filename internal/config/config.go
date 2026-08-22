@@ -230,6 +230,65 @@ func (c File) ResolvedMCPServers() ([]MCPServer, error) {
 	return c.MCPServers, nil
 }
 
+// AddMCPServer records a Streamable HTTP MCP server and sets connectivity.mode.
+// mode must be "direct" or "agentgateway". Same name upserts. Agentgateway
+// with required enforcement keeps exactly one origin.
+func (c *File) AddMCPServer(mode string, srv MCPServer) error {
+	switch mode {
+	case "direct", "agentgateway":
+	default:
+		return fmt.Errorf("mode must be direct or agentgateway")
+	}
+	if err := srv.validate(); err != nil {
+		return err
+	}
+	c.Connectivity.Mode = mode
+	if mode == "agentgateway" {
+		if c.Connectivity.Enforcement == "" {
+			c.Connectivity.Enforcement = "required"
+		}
+		if c.Connectivity.Enforcement == "required" {
+			for _, existing := range c.MCPServers {
+				if existing.Name != srv.Name {
+					return fmt.Errorf("agentgateway required allows exactly one mcp_servers entry (already have %q)", existing.Name)
+				}
+			}
+			c.MCPServers = []MCPServer{srv}
+			return c.Validate()
+		}
+	}
+	for i, existing := range c.MCPServers {
+		if existing.Name == srv.Name {
+			c.MCPServers[i] = srv
+			return c.Validate()
+		}
+	}
+	c.MCPServers = append(c.MCPServers, srv)
+	return c.Validate()
+}
+
+func (c File) Save() error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if err := EnsureLayout(); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	path := Path()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
 func TokenEnv(server MCPServer) string {
 	if server.CredentialEnv != "" {
 		return server.CredentialEnv

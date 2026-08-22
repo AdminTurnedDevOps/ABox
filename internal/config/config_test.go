@@ -78,6 +78,70 @@ func TestEnsureLayoutCreatesHomeAndConfig(t *testing.T) {
 	}
 }
 
+func TestAddMCPServerDirect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ABOX_HOME", "")
+	cfg := Defaults()
+	if err := cfg.AddMCPServer("direct", MCPServer{
+		Name:          "github",
+		URL:           "https://api.githubcopilot.com/mcp/",
+		CredentialEnv: "GITHUB_MCP_TOKEN",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Connectivity.Mode != "direct" || len(cfg.MCPServers) != 1 {
+		t.Fatalf("%#v", cfg)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.MCPServers) != 1 || got.MCPServers[0].Name != "github" {
+		t.Fatalf("%#v", got.MCPServers)
+	}
+}
+
+func TestAddMCPServerAgentgateway(t *testing.T) {
+	cfg := Defaults()
+	if err := cfg.AddMCPServer("agentgateway", MCPServer{
+		Name: "agw",
+		URL:  "https://agw.example/mcp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Connectivity.Mode != "agentgateway" {
+		t.Fatalf("mode %q", cfg.Connectivity.Mode)
+	}
+	if cfg.Connectivity.Enforcement != "required" {
+		t.Fatalf("enforcement %q", cfg.Connectivity.Enforcement)
+	}
+	if len(cfg.MCPServers) != 1 || cfg.MCPServers[0].CredentialEnv != "" {
+		t.Fatalf("%#v", cfg.MCPServers)
+	}
+}
+
+func TestAddMCPServerAgentgatewayRejectsSecondOrigin(t *testing.T) {
+	cfg := Defaults()
+	if err := cfg.AddMCPServer("agentgateway", MCPServer{Name: "agw", URL: "https://agw.example/mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	err := cfg.AddMCPServer("agentgateway", MCPServer{Name: "github", URL: "https://api.githubcopilot.com/mcp/"})
+	if err == nil {
+		t.Fatal("expected second origin rejected")
+	}
+}
+
+func TestAddMCPServerRequiresKnownMode(t *testing.T) {
+	cfg := Defaults()
+	if err := cfg.AddMCPServer("stdio", MCPServer{Name: "x", URL: "https://example.com/mcp"}); err == nil {
+		t.Fatal("expected unknown mode rejected")
+	}
+}
+
 func TestEnsureLayoutDoesNotOverwriteConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
