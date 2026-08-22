@@ -1,7 +1,7 @@
 MODULE := github.com/AdminTurnedDevOps/ABox
 BIN := bin
 ENTITLEMENTS := assets/entitlements.plist
-IMAGE ?= $(HOME)/Library/Caches/ABox/images/abox-guest.raw
+IMAGE ?= $(HOME)/.abox/images/abox-guest.raw
 
 .PHONY: all build guest vmm abox image test fmt tidy sign
 

@@ -138,6 +138,14 @@ type GuestConfig struct {
 	RepoDir    string            `json:"repo_dir"`
 	Model      GuestModel        `json:"model"`
 	Secrets    map[string]string `json:"secrets,omitempty"`
+	MCPServers []GuestMCPServer  `json:"mcp_servers,omitempty"`
+}
+
+type GuestMCPServer struct {
+	Name      string   `json:"name"`
+	URL       string   `json:"url"`
+	TokenEnv  string   `json:"token_env,omitempty"`
+	Allowlist []string `json:"tool_allowlist,omitempty"`
 }
 
 type GuestModel struct {
@@ -163,6 +171,10 @@ type AgentEvent struct {
 type SetModelParams struct {
 	Model   GuestModel        `json:"model"`
 	Secrets map[string]string `json:"secrets,omitempty"`
+}
+
+type SetMCPTokensParams struct {
+	Secrets map[string]string `json:"secrets"`
 }
 
 func WriteFrame(w io.Writer, f Frame) error {

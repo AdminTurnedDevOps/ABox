@@ -54,11 +54,11 @@ No Docker daemon is on the session path.
 | `make image` | Docker, to build the guest disk |
 | `abox` / `--probe-vm` | `abox` + `abox-vmm` + libkrun VM |
 
-`~/Library/Caches/ABox/images/abox-guest.raw` is the **base guest disk**
+`~/.abox/images/abox-guest.raw` is the **base guest disk**
 (Alpine + git + `abox-guest`). Think of it like the microVMs golden hard-drive image. Sessions do not boot that file read/write.
 On start, ABox clones it (APFS copy-on-write when available) to:
 
-`~/Library/Application Support/ABox/sessions/<session-id>/root.raw`
+`~/.abox/sessions/<session-id>/root.raw`
 
 The microVM attaches that session disk. Repo snapshot and agent work land
 there. The cache image stays the clean template for the next session.
@@ -72,7 +72,7 @@ From this repo (or any directory). If Git is missing, dirty, or has no
 commits, ABox copies the files into a private snapshot and leaves your
 host Git alone.
 
-`make image`: uses Docker once to pack a raw Alpine disk (`~/Library/Caches/ABox/images/abox-guest.raw` - the golden HD): base OS, git, patch, and abox-guest. Needed the first time, or when you want a full disk rebuild. Depends on `make guest`.
+`make image`: uses Docker once to pack a raw Alpine disk (`~/.abox/images/abox-guest.raw` - the golden HD): base OS, git, patch, and abox-guest. Needed the first time, or when you want a full disk rebuild. Depends on `make guest`.
 
 `make build` compiles the three binaries into bin/:
 - `abox`: host TUI
@@ -87,6 +87,7 @@ abox
 ```
 
 - `/provider` sets Grok, OpenAI, or Anthropic API keys
+- `/mcp` lists configured Streamable HTTP MCP servers and accepts a Bearer token (`abox mcp login` for OAuth)
 - `ctrl+c` quits
 - The agent runs only inside the guest (MicroVM)
 
@@ -184,6 +185,68 @@ Open the TUI without a VM. The agent will not run; `/provider` still works:
 abox --no-vm
 ```
 
+## LLM Integration
+
+## MCP Integration
+
+ABox is an MCP **client**. Remote tools are Streamable HTTP. Stdio MCP is not implemented.
+
+Much like the LLM integration, you need the ability to control, secure, govern, MCP, along with isolate what MCP Servers can be used. That's why `Streamable HTTP` makes the most sense.
+
+```go
+type StreamableClientTransport struct {
+    Endpoint   string       // The target MCP server HTTP URL
+    HTTPClient *http.Client // The underlying client used for requests
+    MaxRetries int          // Configuration for request/replay retryability
+}
+```
+
+`StreamableClientTransport` is the best choice for this architectural setup as when running an AI agent inside an isolated sandbox (e.g., microVM), the sandbox itself becomes part of your security trust boundary.
+
+![](img/mcpsandbox.png.png)
+
+Config lives at `~/.abox/config.yaml` (same pattern as `~/.claude`, `~/.codex`). First `abox` run creates `~/.abox/` (mode 0700) and a default `config.yaml` if they are missing. Credentials are `~/.abox/credentials.env`.
+
+One guest client. Every remote MCP is a Streamable HTTP `url`. Direct GitHub and an agentgateway virtual MCP are the same field; only `connectivity.mode` changes the policy. `credential_env` is optional (omit when the server needs no Bearer).
+
+- `direct` — guest may dial every `mcp_servers` URL.
+- `agentgateway` — those URLs are the gateway (typically one). Bind GitHub, Atlassian, and the rest **on the gateway**, not as extra ABox origins. ABox does not install the gateway; binary, Docker, or Kubernetes all work. `enforcement: required` means exactly one `mcp_servers` entry.
+- `offline` — no remote MCP.
+
+**Direct mode** — guest dials each configured HTTPS MCP server:
+
+```yaml
+connectivity:
+  mode: direct
+
+mcp_servers:
+  - name: github
+    url: https://api.githubcopilot.com/mcp/
+    credential_env: GITHUB_MCP_TOKEN
+```
+
+**Agentgateway mode** — same `url` field, pointing at the gateway MCP endpoint. No gateway token:
+
+```yaml
+connectivity:
+  mode: agentgateway
+  enforcement: required
+
+mcp_servers:
+  - name: agw
+    url: https://agw.example/mcp
+```
+
+There is no protocol difference. Same guest client, same Streamable HTTP, same url: field. https://api.githubcopilot.com/mcp/ and https://agw.example/mcp are the same kind of thing.
+
+What differs is who is allowed to be an origin.
+
+1. direct: the guest may dial every URL you list. GitHub itself, an agentgateway, both, whatever. Auth is per entry (credential_env optional).
+2. agentgateway + required: config load fails if you list more than one URL. The guest’s allowlist is only that host. Copilot/Atlassian/etc. are bound on the gateway, not as extra ABox origins. That is the fail-closed PLAN rule: no silent fallback to api.githubcopilot.com.
+
+And this brings a huge difference which i, with direct mode, you need to pass in a token/auth. With agentgateway mode, you handle OAuth/token Exchange/OBO via agentgateway policies, governance, and security implementations.
+
+
 ## Why?
 
 A few reasons...
@@ -222,8 +285,8 @@ Because of the above, Go or Rust are naturally great languages. Because I like G
 
 ## What is not done yet
 
-MCP, compaction, checkpoint/rollback/fork, agentgateway, and resource
-acceptance. See `PLAN.md`.
+Compaction, checkpoint/rollback/fork, stdio MCP, host broker, and resource
+acceptance. See `PLAN.md`. Streamable HTTP MCP is in; isolation stays Planned.
 
 ## Security
 
@@ -249,7 +312,9 @@ stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ LLM egress       │ Allowlist: api.x.ai, api.openai.com, api.anthropic.com via TSI inet  │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ TUI              │ Dark full-screen, Enter to send, /provider                           │
+│ MCP              │ Guest Streamable HTTP client; direct URLs or exclusive agentgateway  │
+├──────────────────┼──────────────────────────────────────────────────────────────────────┤
+│ TUI              │ Dark full-screen, Enter to send, /provider, /mcp                     │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ Headless         │ abox exec, --probe-vm                                                │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
@@ -266,10 +331,10 @@ Harness (PLAN §1 / §12)
 • Patch review TUI and host import (export exists in guest; no review/import)
 
 MCP and connectivity
-• Guest MCP client (stdio + brokered HTTP/SSE)
-• Host connectivity broker (typed, no raw URLs)
-• Package origin-rewrite (npm/pip/cargo/Go)
-• Optional agentgateway adapter (fail-closed)
+• Stdio MCP, host byte-broker, origin-rewrite
+• CIMD / client-credentials OAuth
+• MCP resources, prompts, elicitation
+• Per-tool approval UI
 
 Runtime
 • Cold checkpoint, rollback, fork (quiesce ioctl exists; no lineage/UI)

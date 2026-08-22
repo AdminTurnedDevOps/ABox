@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/agent"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/egress"
+	guestmcp "github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 	"golang.org/x/sys/unix"
@@ -41,7 +43,17 @@ func run() error {
 	if err := os.MkdirAll(repo.Root, 0o755); err != nil {
 		return err
 	}
-	loop := &agent.Loop{Model: agent.ModelFromGuest(cfg.Model), Repo: repo}
+	for _, s := range cfg.MCPServers {
+		if u, err := url.Parse(s.URL); err == nil {
+			egress.Allow(u.Hostname())
+		}
+	}
+	mcpMgr := guestmcp.New(cfg.MCPServers, cfg.Secrets)
+	if err := mcpMgr.Connect(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "abox-guest: mcp: %v\n", err)
+	}
+	defer mcpMgr.Close()
+	loop := &agent.Loop{Model: agent.ModelFromGuest(cfg.Model), Repo: repo, MCP: mcpMgr}
 	conn, err := dialVsock(cfg.VsockPort)
 	if err != nil {
 		return fmt.Errorf("vsock: %w", err)
@@ -81,7 +93,7 @@ func run() error {
 			}
 			continue
 		}
-		resp := handle(loop, repo, &archive, frame)
+		resp := handle(loop, repo, mcpMgr, &archive, frame)
 		if err := protocol.WriteFrame(conn, resp); err != nil {
 			return err
 		}
@@ -115,10 +127,22 @@ func applySecrets(secrets map[string]string) {
 	}
 }
 
-func handle(loop *agent.Loop, repo tools.Repo, archive *bytes.Buffer, req protocol.Frame) protocol.Frame {
+func handle(loop *agent.Loop, repo tools.Repo, mcpMgr *guestmcp.Manager, archive *bytes.Buffer, req protocol.Frame) protocol.Frame {
 	out := protocol.Frame{V: protocol.Version, ID: req.ID}
 	var err error
 	switch req.Method {
+	case "set_mcp_tokens":
+		p, e := protocol.DecodeParams[protocol.SetMCPTokensParams](req.Params)
+		if e != nil {
+			err = e
+			break
+		}
+		applySecrets(p.Secrets)
+		if mcpMgr != nil {
+			mcpMgr.SetSecrets(p.Secrets)
+			_ = mcpMgr.Connect(context.Background())
+		}
+		out.Result, _ = protocol.EncodeParams(map[string]bool{"ok": true})
 	case "set_model":
 		p, e := protocol.DecodeParams[protocol.SetModelParams](req.Params)
 		if e != nil {

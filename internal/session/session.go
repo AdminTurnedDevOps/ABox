@@ -68,7 +68,16 @@ func (s *Session) GuestConfigJSON() string {
 	return filepath.Join(s.Dir, "guest-config.json")
 }
 
-func (s *Session) WriteGuestConfig(model config.Model, secrets map[string]string) error {
+func (s *Session) WriteGuestConfig(model config.Model, secrets map[string]string, servers []config.MCPServer) error {
+	var gs []protocol.GuestMCPServer
+	for _, srv := range servers {
+		gs = append(gs, protocol.GuestMCPServer{
+			Name:      srv.Name,
+			URL:       srv.URL,
+			TokenEnv:  config.TokenEnv(srv),
+			Allowlist: srv.ToolAllowlist,
+		})
+	}
 	cfg := protocol.GuestConfig{
 		SessionID:  s.ID,
 		Capability: s.Capability,
@@ -81,7 +90,8 @@ func (s *Session) WriteGuestConfig(model config.Model, secrets map[string]string
 			CredentialEnv: model.CredentialEnv,
 			BaseURL:       model.BaseURL,
 		},
-		Secrets: secrets,
+		Secrets:    secrets,
+		MCPServers: gs,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

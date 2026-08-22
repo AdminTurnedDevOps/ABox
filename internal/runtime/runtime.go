@@ -37,7 +37,7 @@ type VMMConfig struct {
 	ConsoleLog string `json:"console_log"`
 }
 
-func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string) error {
+func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string, mcpServers []config.MCPServer) error {
 	if imagePath == "" {
 		imagePath = filepath.Join(config.ImageDir(), "abox-guest.raw")
 	}
@@ -47,7 +47,7 @@ func Prepare(sess *session.Session, imagePath string, model config.Model, secret
 	if err := cloneFile(imagePath, sess.RootDisk()); err != nil {
 		return fmt.Errorf("clone session disk: %w", err)
 	}
-	if err := sess.WriteGuestConfig(model, secrets); err != nil {
+	if err := sess.WriteGuestConfig(model, secrets, mcpServers); err != nil {
 		return err
 	}
 	return writeConfigDisk(sess)
@@ -254,6 +254,10 @@ func (s *Sandbox) UserTurn(ctx context.Context, text string, onEvent func(protoc
 			return nil
 		}
 	}
+}
+
+func (s *Sandbox) SetMCPTokens(ctx context.Context, secrets map[string]string) error {
+	return s.Call(ctx, "set_mcp_tokens", protocol.SetMCPTokensParams{Secrets: secrets}, nil)
 }
 
 func (s *Sandbox) SetModel(ctx context.Context, model config.Model, secrets map[string]string) error {

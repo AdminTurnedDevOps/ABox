@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IMG="${ABOX_IMAGE:-$HOME/Library/Caches/ABox/images/abox-guest.raw}"
+IMG="${ABOX_IMAGE:-$HOME/.abox/images/abox-guest.raw}"
 BIN="${ROOT}/bin/abox-guest-linux-arm64"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT

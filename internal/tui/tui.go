@@ -23,6 +23,8 @@ const (
 	modeChat uiMode = iota
 	modeProviderPick
 	modeProviderKey
+	modeMCPPick
+	modeMCPKey
 )
 
 type model struct {
@@ -35,6 +37,8 @@ type model struct {
 	slashSel int
 	provSel  int
 	provPick providerChoice
+	mcpSel   int
+	mcpPick  config.MCPServer
 	log      []string
 	width    int
 	height   int
@@ -100,6 +104,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "up":
+			if m.mode == modeMCPPick {
+				if m.mcpSel > 0 {
+					m.mcpSel--
+				}
+				return m, nil
+			}
 			if m.mode == modeProviderPick {
 				if m.provSel > 0 {
 					m.provSel--
@@ -111,6 +121,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "down":
+			if m.mode == modeMCPPick {
+				if m.mcpSel < len(mcpServers(m.cfg))-1 {
+					m.mcpSel++
+				}
+				return m, nil
+			}
 			if m.mode == modeProviderPick {
 				if m.provSel < len(providerChoices())-1 {
 					m.provSel++
@@ -122,6 +138,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "k":
+			if m.mode == modeMCPPick {
+				if m.mcpSel > 0 {
+					m.mcpSel--
+				}
+				return m, nil
+			}
 			if m.mode == modeProviderPick {
 				if m.provSel > 0 {
 					m.provSel--
@@ -129,6 +151,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "j":
+			if m.mode == modeMCPPick {
+				if m.mcpSel < len(mcpServers(m.cfg))-1 {
+					m.mcpSel++
+				}
+				return m, nil
+			}
 			if m.mode == modeProviderPick {
 				if m.provSel < len(providerChoices())-1 {
 					m.provSel++
@@ -144,6 +172,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.mode == modeProviderKey {
 				return m.saveProviderKey()
+			}
+			if m.mode == modeMCPPick {
+				return m.acceptMCP()
+			}
+			if m.mode == modeMCPKey {
+				return m.saveMCPKey()
 			}
 			return m.submit()
 		}
@@ -173,7 +207,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		return m, nil
 	}
-	if m.mode == modeProviderKey {
+	if m.mode == modeProviderKey || m.mode == modeMCPKey {
 		var cmd tea.Cmd
 		m.keyIn, cmd = m.keyIn.Update(msg)
 		return m, cmd
@@ -233,6 +267,11 @@ func (m model) runSlash(text string) (tea.Model, tea.Cmd) {
 		m.provSel = 0
 		m.err = ""
 		return m, nil
+	case "/mcp":
+		m.mode = modeMCPPick
+		m.mcpSel = 0
+		m.err = ""
+		return m, nil
 	case "/help":
 		m.log = append(m.log, "commands:")
 		for _, c := range slashCommands {
@@ -266,6 +305,48 @@ func (m model) acceptProvider() (tea.Model, tea.Cmd) {
 	m.ta.Blur()
 	m.err = ""
 	return m, textinput.Blink
+}
+
+func (m model) acceptMCP() (tea.Model, tea.Cmd) {
+	servers := mcpServers(m.cfg)
+	if m.mcpSel < 0 || m.mcpSel >= len(servers) {
+		m.err = "no MCP servers configured"
+		m.mode = modeChat
+		return m, nil
+	}
+	m.mcpPick = servers[m.mcpSel]
+	m.mode = modeMCPKey
+	m.keyIn.SetValue("")
+	m.keyIn.Focus()
+	m.ta.Blur()
+	m.err = ""
+	return m, textinput.Blink
+}
+
+func (m model) saveMCPKey() (tea.Model, tea.Cmd) {
+	key := strings.TrimSpace(m.keyIn.Value())
+	if key == "" {
+		m.err = "token is empty"
+		return m, nil
+	}
+	env, err := applyMCPKey(m.mcpPick, key)
+	m.keyIn.SetValue("")
+	m.keyIn.Blur()
+	m.ta.Focus()
+	m.mode = modeChat
+	if err != nil {
+		m.err = err.Error()
+		return m, nil
+	}
+	if m.sandbox != nil {
+		if err := m.sandbox.SetMCPTokens(context.Background(), map[string]string{env: key}); err != nil {
+			m.err = "saved on host but guest MCP update failed: " + err.Error()
+			return m, nil
+		}
+	}
+	m.err = ""
+	m.log = append(m.log, "mcp "+m.mcpPick.Name+" token saved  (OAuth: abox mcp login "+m.mcpPick.Name+")")
+	return m, nil
 }
 
 func (m model) saveProviderKey() (tea.Model, tea.Cmd) {
@@ -365,6 +446,28 @@ func (m model) View() tea.View {
 		composer = b.String()
 	case modeProviderKey:
 		composer = "API key for " + m.provPick.Label + "\n" + m.keyIn.View()
+	case modeMCPPick:
+		servers := mcpServers(m.cfg)
+		var b strings.Builder
+		b.WriteString("MCP servers  (OAuth: abox mcp login <name>)\n")
+		if len(servers) == 0 {
+			b.WriteString("  none configured\n")
+		}
+		for i, s := range servers {
+			mark := "  "
+			if i == m.mcpSel {
+				mark = "> "
+			}
+			status := "no token"
+			env := config.TokenEnv(s)
+			if env != "" && strings.TrimSpace(os.Getenv(env)) != "" {
+				status = "token ok"
+			}
+			b.WriteString(mark + s.Name + "  " + s.URL + "  " + status + "\n")
+		}
+		composer = b.String()
+	case modeMCPKey:
+		composer = "Bearer token for " + m.mcpPick.Name + "\n" + m.keyIn.View()
 	default:
 		if m.showingSlash() {
 			var b strings.Builder

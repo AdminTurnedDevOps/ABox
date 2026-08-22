@@ -2,7 +2,7 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${ABOX_IMAGE:-$HOME/Library/Caches/ABox/images/abox-guest.raw}"
+OUT="${ABOX_IMAGE:-$HOME/.abox/images/abox-guest.raw}"
 GUEST_BIN="${ROOT}/bin/abox-guest-linux-arm64"
 
 if [ ! -x "$GUEST_BIN" ]; then

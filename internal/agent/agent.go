@@ -4,17 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
+	"github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
 	"github.com/AdminTurnedDevOps/ABox/internal/provider"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
+type MCPClient interface {
+	Tools() []mcp.Tool
+	Call(ctx context.Context, server, tool string, args json.RawMessage) (string, error)
+}
+
 type Loop struct {
 	Model    config.Model
 	Repo     tools.Repo
+	MCP      MCPClient
 	Messages []provider.Message
 	OnEvent  func(protocol.AgentEvent)
 }
@@ -56,7 +64,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 	}
 	l.Messages = append(l.Messages, provider.Message{Role: "user", Content: user})
 	for i := 0; i < 16; i++ {
-		events, err := provider.Stream(ctx, l.Model, l.Messages, BuiltinTools())
+		events, err := provider.Stream(ctx, l.Model, l.Messages, l.allTools())
 		if err != nil {
 			l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
 			return err
@@ -104,7 +112,44 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 	return fmt.Errorf("turn limit reached")
 }
 
+func (l *Loop) allTools() []provider.ToolSchema {
+	tools := BuiltinTools()
+	if l.MCP == nil {
+		return tools
+	}
+	for _, t := range l.MCP.Tools() {
+		name := t.Prefixed
+		if name == "" {
+			name = t.Server + "__" + t.Name
+		}
+		desc := t.Description
+		if t.Server != "" {
+			desc = "[" + t.Server + "] " + desc
+		}
+		tools = append(tools, provider.ToolSchema{
+			Name:        name,
+			Description: desc,
+			Parameters:  t.Parameters,
+		})
+	}
+	return tools
+}
+
+func splitMCPName(name string) (server, tool string, ok bool) {
+	server, tool, found := strings.Cut(name, "__")
+	if !found || server == "" || tool == "" {
+		return "", "", false
+	}
+	return server, tool, true
+}
+
 func (l *Loop) execTool(ctx context.Context, ev provider.Event) (string, error) {
+	if server, tool, ok := splitMCPName(ev.ToolName); ok {
+		if l.MCP == nil {
+			return "", fmt.Errorf("mcp is not configured")
+		}
+		return l.MCP.Call(ctx, server, tool, json.RawMessage(ev.ToolArgs))
+	}
 	switch ev.ToolName {
 	case "list_files":
 		var args struct {

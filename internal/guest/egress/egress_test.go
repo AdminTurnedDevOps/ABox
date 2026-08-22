@@ -21,3 +21,18 @@ func TestDialDeniesOtherHosts(t *testing.T) {
 		t.Fatal("expected deny")
 	}
 }
+
+func TestAllowAddsMCPHost(t *testing.T) {
+	t.Cleanup(ResetForTest)
+	ResetForTest()
+	if Allowed("mcp.example.com") {
+		t.Fatal("expected mcp host denied before Allow")
+	}
+	Allow("mcp.example.com")
+	if !Allowed("mcp.example.com") {
+		t.Fatal("expected mcp host allowed after Allow")
+	}
+	if Allowed("example.com") {
+		t.Fatal("expected unrelated host still denied")
+	}
+}

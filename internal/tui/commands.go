@@ -14,6 +14,7 @@ type slashCmd struct {
 
 var slashCommands = []slashCmd{
 	{Name: "/provider", Help: "Connect Grok, OpenAI, or Anthropic and set an API key"},
+	{Name: "/mcp", Help: "List MCP servers and paste a Bearer token (OAuth: abox mcp login)"},
 	{Name: "/help", Help: "List slash commands"},
 }
 
@@ -44,6 +45,23 @@ func filterSlash(q string) []slashCmd {
 		}
 	}
 	return out
+}
+
+func mcpServers(cfg config.File) []config.MCPServer {
+	servers, err := cfg.ResolvedMCPServers()
+	if err != nil {
+		return nil
+	}
+	return servers
+}
+
+func applyMCPKey(server config.MCPServer, key string) (string, error) {
+	env := config.TokenEnv(server)
+	if err := credentials.Save(env, key); err != nil {
+		return "", err
+	}
+	credentials.SetEnv(env, key)
+	return env, nil
 }
 
 func applyProviderKey(cfg config.File, choice providerChoice, key string) (config.Model, error) {

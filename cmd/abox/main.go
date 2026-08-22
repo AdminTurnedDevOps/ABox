@@ -12,6 +12,7 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
+	"github.com/AdminTurnedDevOps/ABox/internal/mcpauth"
 	"github.com/AdminTurnedDevOps/ABox/internal/repository"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
 	"github.com/AdminTurnedDevOps/ABox/internal/session"
@@ -27,6 +28,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		return runMCP(os.Args[2:])
+	}
 	fs := flag.NewFlagSet("abox", flag.ContinueOnError)
 	execFlag := fs.Bool("exec", false, "headless driver")
 	prompt := fs.String("prompt", "", "prompt for exec mode")
@@ -90,7 +94,11 @@ func run() error {
 		if image == "" {
 			image = filepath.Join(config.ImageDir(), "abox-guest.raw")
 		}
-		if err := runtime.Prepare(sess, image, sel, currentSecrets()); err != nil {
+		mcpServers, err := cfg.ResolvedMCPServers()
+		if err != nil {
+			return err
+		}
+		if err := runtime.Prepare(sess, image, sel, currentSecrets(cfg), mcpServers); err != nil {
 			if execMode {
 				return err
 			}
@@ -163,12 +171,48 @@ func runExec(sb *runtime.Sandbox, prompt string) error {
 	})
 }
 
-func currentSecrets() map[string]string {
+func currentSecrets(cfg config.File) map[string]string {
 	out := map[string]string{}
 	for _, name := range []string{"XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
 		if v := os.Getenv(name); v != "" {
 			out[name] = v
 		}
 	}
+	servers, err := cfg.ResolvedMCPServers()
+	if err != nil {
+		return out
+	}
+	for _, s := range servers {
+		name := config.TokenEnv(s)
+		if v := os.Getenv(name); v != "" {
+			out[name] = v
+		}
+	}
 	return out
+}
+
+func runMCP(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: abox mcp login <server-name>")
+	}
+	switch args[0] {
+	case "login":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: abox mcp login <server-name>")
+		}
+		return mcpLogin(args[1])
+	default:
+		return fmt.Errorf("unknown mcp command %q", args[0])
+	}
+}
+
+func mcpLogin(name string) error {
+	cfg, _, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if err := credentials.ApplyToEnv(); err != nil {
+		return err
+	}
+	return mcpauth.LoginNamed(context.Background(), cfg, name)
 }

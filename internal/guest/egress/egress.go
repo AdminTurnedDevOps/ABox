@@ -4,28 +4,58 @@ package egress
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
-var allowedHosts = map[string]struct{}{
+var defaultAllowed = map[string]struct{}{
 	"api.x.ai":          {},
 	"api.openai.com":    {},
 	"api.anthropic.com": {},
 }
 
+var (
+	allowedMu    sync.Mutex
+	allowedHosts = maps.Clone(defaultAllowed)
+)
+
 var dnsServers = []string{"1.1.1.1:53", "8.8.8.8:53"}
 
-func Allowed(host string) bool {
+func normalizeHost(host string) string {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
+	return host
+}
+
+func Allowed(host string) bool {
+	host = normalizeHost(host)
+	allowedMu.Lock()
+	defer allowedMu.Unlock()
 	_, ok := allowedHosts[host]
 	return ok
+}
+
+func Allow(host string) {
+	host = normalizeHost(host)
+	if host == "" {
+		return
+	}
+	allowedMu.Lock()
+	defer allowedMu.Unlock()
+	allowedHosts[host] = struct{}{}
+}
+
+func ResetForTest() {
+	allowedMu.Lock()
+	defer allowedMu.Unlock()
+	allowedHosts = maps.Clone(defaultAllowed)
 }
 
 func ConfigureGuestResolver() error {
@@ -67,7 +97,7 @@ func Transport() *http.Transport {
 				return nil, err
 			}
 			if !Allowed(host) {
-				return nil, fmt.Errorf("egress denied: %s is not an allowed LLM endpoint", host)
+				return nil, fmt.Errorf("egress denied: %s is not an allowed endpoint", host)
 			}
 			if port != "443" {
 				return nil, fmt.Errorf("egress denied: only HTTPS :443 is allowed")
