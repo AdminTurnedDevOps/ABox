@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
@@ -193,17 +194,52 @@ func currentSecrets(cfg config.File) map[string]string {
 
 func runMCP(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: abox mcp login <server-name>")
+		return fmt.Errorf("usage: abox mcp add --mode <direct|agentgateway> [--credential-env NAME] <name> <url>\n       abox mcp login <server-name>")
 	}
 	switch args[0] {
+	case "add":
+		return mcpAdd(args[1:])
 	case "login":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: abox mcp login <server-name>")
 		}
 		return mcpLogin(args[1])
 	default:
-		return fmt.Errorf("unknown mcp command %q", args[0])
+		return fmt.Errorf("unknown mcp command %q\nusage: abox mcp add --mode <direct|agentgateway> <name> <url>", args[0])
 	}
+}
+
+func mcpAdd(args []string) error {
+	fs := flag.NewFlagSet("abox mcp add", flag.ContinueOnError)
+	mode := fs.String("mode", "", "direct or agentgateway")
+	cred := fs.String("credential-env", "", "optional env var holding a Bearer token")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if strings.TrimSpace(*mode) == "" || len(rest) != 2 {
+		return fmt.Errorf("usage: abox mcp add --mode <direct|agentgateway> [--credential-env NAME] <name> <url>")
+	}
+	cfg, path, err := config.Load()
+	if err != nil {
+		return err
+	}
+	srv := config.MCPServer{
+		Name:          rest[0],
+		URL:           rest[1],
+		CredentialEnv: strings.TrimSpace(*cred),
+	}
+	if err := cfg.AddMCPServer(*mode, srv); err != nil {
+		return err
+	}
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("added %s (%s) %s\n  config %s\n", srv.Name, *mode, srv.URL, path)
+	if *mode == "direct" && srv.CredentialEnv != "" {
+		fmt.Printf("  set %s or run: abox mcp login %s\n", srv.CredentialEnv, srv.Name)
+	}
+	return nil
 }
 
 func mcpLogin(name string) error {
