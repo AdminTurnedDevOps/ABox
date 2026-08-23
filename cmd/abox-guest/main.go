@@ -53,7 +53,10 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "abox-guest: mcp: %v\n", err)
 	}
 	defer mcpMgr.Close()
-	loop := &agent.Loop{Model: agent.ModelFromGuest(cfg.Model), Repo: repo, MCP: mcpMgr}
+	loop := &agent.Loop{Model: agent.ModelFromGuest(cfg.Model), Repo: repo, MCP: mcpMgr, ContextFile: agent.DefaultContextFile}
+	if err := loop.LoadContext(); err != nil {
+		fmt.Fprintf(os.Stderr, "abox-guest: context: %v\n", err)
+	}
 	conn, err := dialVsock(cfg.VsockPort)
 	if err != nil {
 		return fmt.Errorf("vsock: %w", err)
@@ -113,8 +116,10 @@ func handleTurn(conn net.Conn, loop *agent.Loop, req protocol.Frame) error {
 		_ = protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Method: "agent_event", Params: raw})
 	}
 	if err := loop.Turn(context.Background(), p.Text); err != nil {
+		_ = loop.SaveContext()
 		return protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Error: &protocol.Error{Code: "agent", Message: err.Error()}})
 	}
+	_ = loop.SaveContext()
 	ok, _ := protocol.EncodeParams(map[string]bool{"ok": true})
 	return protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Result: ok})
 }
@@ -251,6 +256,7 @@ func handle(loop *agent.Loop, repo tools.Repo, mcpMgr *guestmcp.Manager, archive
 		_ = execSetTime(t)
 		out.Result, _ = protocol.EncodeParams(map[string]bool{"ok": true})
 	case "shutdown":
+		_ = loop.SaveContext()
 		out.Result, _ = protocol.EncodeParams(map[string]bool{"ok": true})
 	default:
 		err = fmt.Errorf("unknown method %q", req.Method)
@@ -321,6 +327,7 @@ func prepMounts() {
 	_ = os.MkdirAll("/dev", 0o755)
 	_ = os.MkdirAll("/tmp", 0o1777)
 	_ = os.MkdirAll("/work/repo", 0o755)
+	_ = os.MkdirAll("/var/lib/abox", 0o755)
 	_ = mountIfNeeded("proc", "/proc")
 	_ = mountIfNeeded("sysfs", "/sys")
 	_ = mountIfNeeded("devtmpfs", "/dev")

@@ -87,6 +87,10 @@ func ArchiveHEAD(root string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+func TopLevel(start string) (string, error) {
+	return gitOutput(start, "rev-parse", "--show-toplevel")
+}
+
 func gitOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir

@@ -37,6 +37,7 @@ func run() error {
 	prompt := fs.String("prompt", "", "prompt for exec mode")
 	modelName := fs.String("model", "", "configured model profile name")
 	probeVM := fs.Bool("probe-vm", false, "boot the guest and list files; no model call")
+	resume := fs.Bool("resume", false, "resume a previous session for this repository (same root.raw and conversation)")
 	args := os.Args[1:]
 	execMode := false
 	if len(args) > 0 && args[0] == "exec" {
@@ -70,21 +71,41 @@ func run() error {
 		return err
 	}
 
-	sess, err := session.Create(wd, "pending")
-	if err != nil {
-		return err
+	resumeID := ""
+	if *resume {
+		if extra := fs.Args(); len(extra) > 0 {
+			resumeID = extra[0]
+		}
 	}
-	snap, err := repository.OpenForSession(wd, filepath.Join(sess.Dir, "host-tree"))
-	if err != nil {
-		return err
-	}
-	sess.RepoRoot = snap.Root
-	sess.HEAD = snap.HEAD
-	if err := sess.WriteMeta(); err != nil {
-		return err
-	}
-	if snap.Ephemeral {
-		fmt.Fprintf(os.Stderr, "abox: no clean committed worktree; using an ephemeral snapshot. host git is unchanged.\n")
+
+	var sess *session.Session
+	var snap repository.Snapshot
+	if *resume {
+		loaded, err := loadResumeSession(wd, resumeID)
+		if err != nil {
+			return err
+		}
+		sess = loaded
+		fmt.Fprintf(os.Stderr, "abox: resuming session %s\n", sess.ID)
+	} else {
+		created, err := session.Create(wd, "pending")
+		if err != nil {
+			return err
+		}
+		sess = created
+		opened, err := repository.OpenForSession(wd, filepath.Join(sess.Dir, "host-tree"))
+		if err != nil {
+			return err
+		}
+		snap = opened
+		sess.RepoRoot = snap.Root
+		sess.HEAD = snap.HEAD
+		if err := sess.WriteMeta(); err != nil {
+			return err
+		}
+		if snap.Ephemeral {
+			fmt.Fprintf(os.Stderr, "abox: no clean committed worktree; using an ephemeral snapshot. host git is unchanged.\n")
+		}
 	}
 
 	var sb *runtime.Sandbox
@@ -97,7 +118,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := runtime.Prepare(sess, image, sel, currentSecrets(cfg), mcpServers); err != nil {
+	if err := runtime.Prepare(sess, image, sel, currentSecrets(cfg), mcpServers, *resume); err != nil {
 		if execMode {
 			return err
 		}
@@ -124,12 +145,14 @@ func run() error {
 			sb = started
 			vmState = "ready"
 			defer sb.Stop()
-			archive, err := repository.ArchiveHEAD(snap.Root)
-			if err != nil {
-				return err
-			}
-			if err := sb.TransferArchive(context.Background(), archive); err != nil {
-				fmt.Fprintf(os.Stderr, "abox: repo transfer: %v\n", err)
+			if !*resume {
+				archive, err := repository.ArchiveHEAD(snap.Root)
+				if err != nil {
+					return err
+				}
+				if err := sb.TransferArchive(context.Background(), archive); err != nil {
+					fmt.Fprintf(os.Stderr, "abox: repo transfer: %v\n", err)
+				}
 			}
 		}
 	}
@@ -167,6 +190,21 @@ func runExec(sb *runtime.Sandbox, prompt string) error {
 	return sb.UserTurn(ctx, prompt, func(e protocol.AgentEvent) {
 		_ = enc.Encode(e)
 	})
+}
+
+func loadResumeSession(wd, id string) (*session.Session, error) {
+	if id != "" {
+		return session.Load(id)
+	}
+	abs, err := filepath.Abs(wd)
+	if err != nil {
+		abs = wd
+	}
+	roots := []string{abs}
+	if top, err := repository.TopLevel(wd); err == nil {
+		roots = append(roots, top)
+	}
+	return session.LatestForRepo(roots...)
 }
 
 func currentSecrets(cfg config.File) map[string]string {

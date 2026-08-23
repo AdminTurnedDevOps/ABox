@@ -52,6 +52,80 @@ func Create(repoRoot, head string) (*Session, error) {
 	return s, nil
 }
 
+func Load(id string) (*Session, error) {
+	if id == "" {
+		return nil, fmt.Errorf("empty session id")
+	}
+	dir := filepath.Join(config.SessionRoot(), id)
+	data, err := os.ReadFile(filepath.Join(dir, "session.json"))
+	if err != nil {
+		return nil, fmt.Errorf("session %s: %w", id, err)
+	}
+	var s Session
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("session %s: %w", id, err)
+	}
+	s.Dir = dir
+	s.ID = id
+	if _, err := os.Stat(s.RootDisk()); err != nil {
+		return nil, fmt.Errorf("session %s: missing root.raw", id)
+	}
+	return &s, nil
+}
+
+// LatestForRepo returns the newest session whose RepoRoot matches any of roots
+// and that still has a root.raw disk.
+func LatestForRepo(roots ...string) (*Session, error) {
+	want := map[string]struct{}{}
+	for _, r := range roots {
+		if r == "" {
+			continue
+		}
+		abs, err := filepath.Abs(r)
+		if err != nil {
+			abs = filepath.Clean(r)
+		}
+		want[abs] = struct{}{}
+		want[filepath.Clean(r)] = struct{}{}
+	}
+	if len(want) == 0 {
+		return nil, fmt.Errorf("no repository root to match")
+	}
+	entries, err := os.ReadDir(config.SessionRoot())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no sessions to resume")
+		}
+		return nil, err
+	}
+	var best *Session
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		s, err := Load(e.Name())
+		if err != nil {
+			continue
+		}
+		root := s.RepoRoot
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+		if _, ok := want[root]; !ok {
+			if _, ok := want[filepath.Clean(s.RepoRoot)]; !ok {
+				continue
+			}
+		}
+		if best == nil || s.Created.After(best.Created) {
+			best = s
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("no session to resume for this repository")
+	}
+	return best, nil
+}
+
 func (s *Session) WriteMeta() error {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

@@ -37,15 +37,21 @@ type VMMConfig struct {
 	ConsoleLog string `json:"console_log"`
 }
 
-func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string, mcpServers []config.MCPServer) error {
+func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string, mcpServers []config.MCPServer, resume bool) error {
 	if imagePath == "" {
 		imagePath = filepath.Join(config.ImageDir(), "abox-guest.raw")
 	}
-	if _, err := os.Stat(imagePath); err != nil {
-		return fmt.Errorf("guest image missing at %s (run: make image)", imagePath)
-	}
-	if err := cloneFile(imagePath, sess.RootDisk()); err != nil {
-		return fmt.Errorf("clone session disk: %w", err)
+	if resume {
+		if _, err := os.Stat(sess.RootDisk()); err != nil {
+			return fmt.Errorf("resume: session disk missing at %s", sess.RootDisk())
+		}
+	} else {
+		if _, err := os.Stat(imagePath); err != nil {
+			return fmt.Errorf("guest image missing at %s (run: make image)", imagePath)
+		}
+		if err := cloneFile(imagePath, sess.RootDisk()); err != nil {
+			return fmt.Errorf("clone session disk: %w", err)
+		}
 	}
 	if err := sess.WriteGuestConfig(model, secrets, mcpServers); err != nil {
 		return err
@@ -79,6 +85,7 @@ func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int,
 	if vmmPath == "" {
 		return nil, fmt.Errorf("abox-vmm not found; build with make build")
 	}
+	_ = os.Remove(sess.RPCSocket())
 	ln, err := net.Listen("unix", sess.RPCSocket())
 	if err != nil {
 		return nil, fmt.Errorf("listen rpc: %w", err)
