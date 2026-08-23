@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AdminTurnedDevOps/ABox/internal/agent"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
 	"github.com/AdminTurnedDevOps/ABox/internal/mcpauth"
@@ -174,7 +175,41 @@ func run() error {
 	if execMode {
 		return runExec(sb, *prompt)
 	}
-	return tui.Run(cfg, sel, sb, vmState)
+	var log []string
+	if *resume {
+		log = resumeLog(sess, sb)
+		if len(log) > 0 {
+			_ = session.WriteTranscript(sess.TranscriptPath(), log)
+		}
+	}
+	return tui.Run(cfg, sel, sb, vmState, log, sess.TranscriptPath())
+}
+
+func resumeLog(sess *session.Session, sb *runtime.Sandbox) []string {
+	if lines, err := session.ReadTranscript(sess.TranscriptPath()); err == nil && len(lines) > 0 {
+		return lines
+	}
+	if sb == nil {
+		return nil
+	}
+	if len(sb.History) > 0 {
+		return tui.LogFromHistory(sb.History)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var got protocol.GetContextResult
+	if err := sb.Call(ctx, "get_context", struct{}{}, &got); err == nil && len(got.History) > 0 {
+		return tui.LogFromHistory(got.History)
+	}
+	var run protocol.RunCommandResult
+	if err := sb.Call(ctx, "run_command", protocol.RunCommandParams{Command: "cat /var/lib/abox/context.json", Timeout: 5}, &run); err != nil || run.ExitCode != 0 {
+		return nil
+	}
+	hist, err := agent.HistoryFromContextJSON([]byte(run.Stdout))
+	if err != nil {
+		return nil
+	}
+	return tui.LogFromHistory(hist)
 }
 
 func runExec(sb *runtime.Sandbox, prompt string) error {

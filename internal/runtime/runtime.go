@@ -19,11 +19,12 @@ import (
 )
 
 type Sandbox struct {
-	Sess   *session.Session
-	cmd    *exec.Cmd
-	conn   net.Conn
-	mu     sync.Mutex
-	nextID int
+	Sess    *session.Session
+	History []protocol.HistoryLine
+	cmd     *exec.Cmd
+	conn    net.Conn
+	mu      sync.Mutex
+	nextID  int
 }
 
 type VMMConfig struct {
@@ -192,6 +193,7 @@ func (s *Sandbox) waitHello(ctx context.Context) error {
 	if err := protocol.WriteFrame(s.conn, protocol.Frame{ID: frame.ID, Result: ok}); err != nil {
 		return err
 	}
+	s.History = hello.History
 	_ = s.conn.SetDeadline(time.Time{})
 	return nil
 }

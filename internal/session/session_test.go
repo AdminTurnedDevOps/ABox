@@ -99,6 +99,32 @@ func TestLatestForRepoSkipsMissingDisk(t *testing.T) {
 	}
 }
 
+func TestTranscriptRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, err := Create("/repo", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{"you: hi", "", "hello"}
+	if err := WriteTranscript(s.TranscriptPath(), lines); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadTranscript(s.TranscriptPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0] != "you: hi" || got[2] != "hello" {
+		t.Fatalf("%#v", got)
+	}
+}
+
+func TestReadTranscriptMissing(t *testing.T) {
+	got, err := ReadTranscript(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil || got != nil {
+		t.Fatalf("%v %#v", err, got)
+	}
+}
+
 func TestLatestForRepoNone(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := os.MkdirAll(config.SessionRoot(), 0o700); err != nil {

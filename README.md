@@ -68,7 +68,7 @@ Guest storage is files on the Mac, not a mount of your repo. Three files matter:
 
 The VM boots **only** the session clone, not the golden file. Destroy a session directory and that run’s guest files are gone; the golden image stays clean for the next `abox`. `make image-update` patches `/usr/local/bin/abox-guest` on an existing golden disk; `make image` rebuilds the golden disk from scratch.
 
-`abox --resume` does **not** clone the golden image again. It boots the existing `root.raw` for that session and the guest reloads conversation state from `/var/lib/abox/context.json` on that disk. The host git tree is not re-copied (that would overwrite guest work).
+`abox --resume` does **not** clone the golden image again. It boots the existing `root.raw` for that session and the guest reloads conversation state from `/var/lib/abox/context.json` on that disk. The TUI reloads the same transcript (host `transcript.json`, or the guest context if that file is missing). The host git tree is not re-copied (that would overwrite guest work).
 
 ## Quickstart
 
@@ -92,7 +92,7 @@ abox
 
 - `/provider` sets Grok, OpenAI, or Anthropic API keys
 - `/mcp` lists configured Streamable HTTP MCP servers and accepts a Bearer token (`abox mcp login` for OAuth)
-- `abox --resume` reopens the latest session for this repo (same `root.raw` and LLM conversation). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
+- `abox --resume` reopens the latest session for this repo (same `root.raw`, LLM conversation, and TUI transcript). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
 - `ctrl+c` quits
 - The agent runs only inside the guest (MicroVM)
 

@@ -49,6 +49,45 @@ func TestSaveLoadMessagesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHistoryFromMessages(t *testing.T) {
+	got := HistoryFromMessages([]provider.Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", ToolName: "list_files"},
+		{Role: "tool", ToolResult: "ok"},
+		{Role: "assistant", Content: "done"},
+	})
+	if len(got) != 3 {
+		t.Fatalf("%#v", got)
+	}
+	if got[0].Kind != "user" || got[0].Text != "hi" {
+		t.Fatalf("%#v", got[0])
+	}
+	if got[1].Kind != "tool" || got[1].Tool != "list_files" || got[1].Text != "ok" {
+		t.Fatalf("%#v", got[1])
+	}
+	if got[2].Kind != "text" || got[2].Text != "done" {
+		t.Fatalf("%#v", got[2])
+	}
+}
+
+func TestHistoryFromContextJSON(t *testing.T) {
+	raw := []byte(`[{"Role":"user","Content":"hi"}]`)
+	got, err := HistoryFromContextJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Kind != "user" || got[0].Text != "hi" {
+		t.Fatalf("%#v", got)
+	}
+}
+
+func TestParseMessagesEmpty(t *testing.T) {
+	got, err := ParseMessages(nil)
+	if err != nil || got != nil {
+		t.Fatalf("%v %#v", err, got)
+	}
+}
+
 func TestLoadContextMissingFile(t *testing.T) {
 	l := &Loop{ContextFile: filepath.Join(t.TempDir(), "missing.json")}
 	if err := l.LoadContext(); err != nil {
