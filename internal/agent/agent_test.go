@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,6 +23,51 @@ func TestTurnRequiresGuestRepo(t *testing.T) {
 	err := l.Turn(context.Background(), "hi")
 	if err == nil || !strings.Contains(err.Error(), "microVM") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSaveLoadMessagesRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "context.json")
+	l := &Loop{
+		ContextFile: path,
+		Messages: []provider.Message{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: "hello"},
+			{Role: "tool", ToolID: "1", ToolResult: "ok"},
+		},
+	}
+	if err := l.SaveContext(); err != nil {
+		t.Fatal(err)
+	}
+	l2 := &Loop{ContextFile: path}
+	if err := l2.LoadContext(); err != nil {
+		t.Fatal(err)
+	}
+	if len(l2.Messages) != 3 || l2.Messages[0].Content != "hi" || l2.Messages[2].ToolResult != "ok" {
+		t.Fatalf("%#v", l2.Messages)
+	}
+}
+
+func TestLoadContextMissingFile(t *testing.T) {
+	l := &Loop{ContextFile: filepath.Join(t.TempDir(), "missing.json")}
+	if err := l.LoadContext(); err != nil {
+		t.Fatal(err)
+	}
+	if l.Messages != nil {
+		t.Fatalf("%#v", l.Messages)
+	}
+}
+
+func TestTrimMessagesKeepsNewest(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: "user", Content: strings.Repeat("a", 200)},
+		{Role: "user", Content: strings.Repeat("b", 200)},
+		{Role: "user", Content: "tail"},
+	}
+	got := trimMessages(msgs, 80)
+	if len(got) == 0 || got[len(got)-1].Content != "tail" {
+		t.Fatalf("%#v", got)
 	}
 }
 

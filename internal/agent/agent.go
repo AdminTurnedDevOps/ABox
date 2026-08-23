@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,12 +21,18 @@ type MCPClient interface {
 	Call(ctx context.Context, server, tool string, args json.RawMessage) (string, error)
 }
 
+const (
+	DefaultContextFile = "/var/lib/abox/context.json"
+	maxContextBytes    = 2 << 20
+)
+
 type Loop struct {
-	Model    config.Model
-	Repo     tools.Repo
-	MCP      MCPClient
-	Messages []provider.Message
-	OnEvent  func(protocol.AgentEvent)
+	Model       config.Model
+	Repo        tools.Repo
+	MCP         MCPClient
+	Messages    []provider.Message
+	ContextFile string
+	OnEvent     func(protocol.AgentEvent)
 }
 
 func BuiltinTools() []provider.ToolSchema {
@@ -67,6 +75,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 		events, err := provider.Stream(ctx, l.Model, l.Messages, l.allTools())
 		if err != nil {
 			l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
+			_ = l.SaveContext()
 			return err
 		}
 		var text string
@@ -80,6 +89,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 				tool = ev
 			case "error":
 				l.emit(protocol.AgentEvent{Kind: "error", Err: ev.Err.Error()})
+				_ = l.SaveContext()
 				return ev.Err
 			}
 		}
@@ -88,6 +98,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 				l.Messages = append(l.Messages, provider.Message{Role: "assistant", Content: text})
 			}
 			l.emit(protocol.AgentEvent{Kind: "done"})
+			_ = l.SaveContext()
 			return nil
 		}
 		l.Messages = append(l.Messages, provider.Message{
@@ -109,7 +120,85 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 			ToolResult: result,
 		})
 	}
+	_ = l.SaveContext()
 	return fmt.Errorf("turn limit reached")
+}
+
+func (l *Loop) contextPath() string {
+	if l.ContextFile != "" {
+		return l.ContextFile
+	}
+	return DefaultContextFile
+}
+
+func (l *Loop) SaveContext() error {
+	return SaveMessages(l.contextPath(), l.Messages)
+}
+
+func (l *Loop) LoadContext() error {
+	msgs, err := LoadMessages(l.contextPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	l.Messages = msgs
+	return nil
+}
+
+func SaveMessages(path string, msgs []provider.Message) error {
+	if path == "" {
+		return fmt.Errorf("empty context path")
+	}
+	trimmed := trimMessages(msgs, maxContextBytes)
+	data, err := json.MarshalIndent(trimmed, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func LoadMessages(path string) ([]provider.Message, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var msgs []provider.Message
+	if err := json.Unmarshal(data, &msgs); err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+func trimMessages(msgs []provider.Message, max int) []provider.Message {
+	if max <= 0 {
+		return nil
+	}
+	var out []provider.Message
+	var size int
+	for i := len(msgs) - 1; i >= 0; i-- {
+		b, err := json.Marshal(msgs[i])
+		if err != nil {
+			continue
+		}
+		if size+len(b) > max && len(out) > 0 {
+			break
+		}
+		out = append(out, msgs[i])
+		size += len(b)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 func (l *Loop) allTools() []provider.ToolSchema {
