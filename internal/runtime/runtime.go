@@ -64,7 +64,9 @@ func writeConfigDisk(sess *session.Session) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(sess.ConfigDisk(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o400)
+	// Resume rewrites config.raw; the previous run left it mode 0400.
+	_ = os.Chmod(sess.ConfigDisk(), 0o600)
+	f, err := os.OpenFile(sess.ConfigDisk(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

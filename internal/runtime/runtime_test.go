@@ -57,3 +57,28 @@ func TestPrepareResumeDoesNotClobberRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPrepareResumeRewritesReadOnlyConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, err := session.Create("/repo", "head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.RootDisk(), []byte("disk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.ConfigDisk(), make([]byte, 1<<20), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	err = Prepare(s, "", config.Model{Name: "grok", Provider: "xai", Model: "grok-4"}, map[string]string{"XAI_API_KEY": "k"}, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(s.ConfigDisk())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o400 {
+		t.Fatalf("perm %o", st.Mode().Perm())
+	}
+}
