@@ -13,6 +13,7 @@ const (
 	Version         = 1
 	MaxFrameBytes   = 1 << 20
 	MaxArchiveChunk = 256 << 10
+	MaxHistoryBytes = 256 << 10
 	RPCPort         = 1024
 )
 
@@ -39,11 +40,24 @@ func (e *Error) Error() string {
 }
 
 type HelloParams struct {
-	SessionID  string `json:"session_id"`
-	Capability string `json:"capability"`
-	ImageID    string `json:"image_id"`
-	Protocol   int    `json:"protocol"`
-	GuestReady bool   `json:"guest_ready"`
+	SessionID  string        `json:"session_id"`
+	Capability string        `json:"capability"`
+	ImageID    string        `json:"image_id"`
+	Protocol   int           `json:"protocol"`
+	GuestReady bool          `json:"guest_ready"`
+	History    []HistoryLine `json:"history,omitempty"`
+}
+
+type HistoryLine struct {
+	Kind   string `json:"kind"`
+	Text   string `json:"text,omitempty"`
+	Tool   string `json:"tool,omitempty"`
+	Status string `json:"status,omitempty"`
+	Err    string `json:"err,omitempty"`
+}
+
+type GetContextResult struct {
+	History []HistoryLine `json:"history"`
 }
 
 type HelloResult struct {
@@ -219,6 +233,30 @@ func ReadFrameLimit(r io.Reader, limit int) (Frame, error) {
 		return Frame{}, err
 	}
 	return f, nil
+}
+
+// TrimHistory keeps the newest lines whose JSON size fits in maxBytes.
+func TrimHistory(h []HistoryLine, maxBytes int) []HistoryLine {
+	if maxBytes <= 0 {
+		return nil
+	}
+	var out []HistoryLine
+	var size int
+	for i := len(h) - 1; i >= 0; i-- {
+		b, err := json.Marshal(h[i])
+		if err != nil {
+			continue
+		}
+		if size+len(b) > maxBytes && len(out) > 0 {
+			break
+		}
+		out = append(out, h[i])
+		size += len(b)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 func EncodeParams(v any) (json.RawMessage, error) {

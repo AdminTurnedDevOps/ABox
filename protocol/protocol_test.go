@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,17 @@ func TestFrameRoundTrip(t *testing.T) {
 	}
 	if got.ID != "1" || got.Method != "list_files" {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestTrimHistoryKeepsNewest(t *testing.T) {
+	h := []HistoryLine{
+		{Kind: "user", Text: strings.Repeat("a", 200)},
+		{Kind: "text", Text: "tail"},
+	}
+	got := TrimHistory(h, 40)
+	if len(got) == 0 || got[len(got)-1].Text != "tail" {
+		t.Fatalf("%#v", got)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
+	"github.com/AdminTurnedDevOps/ABox/internal/session"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
@@ -28,32 +29,33 @@ const (
 )
 
 type model struct {
-	cfg      config.File
-	sel      config.Model
-	sandbox  *runtime.Sandbox
-	ta       textarea.Model
-	keyIn    textinput.Model
-	mode     uiMode
-	slashSel int
-	provSel  int
-	provPick providerChoice
-	mcpSel   int
-	mcpPick  config.MCPServer
-	log      []string
-	width    int
-	height   int
-	busy     bool
-	vmState  string
-	err      string
-	cancel   context.CancelFunc
-	events   <-chan protocol.AgentEvent
+	cfg            config.File
+	sel            config.Model
+	sandbox        *runtime.Sandbox
+	ta             textarea.Model
+	keyIn          textinput.Model
+	mode           uiMode
+	slashSel       int
+	provSel        int
+	provPick       providerChoice
+	mcpSel         int
+	mcpPick        config.MCPServer
+	log            []string
+	transcriptPath string
+	width          int
+	height         int
+	busy           bool
+	vmState        string
+	err            string
+	cancel         context.CancelFunc
+	events         <-chan protocol.AgentEvent
 }
 
 type evMsg protocol.AgentEvent
 type errMsg error
 type doneMsg struct{}
 
-func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string) model {
+func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string, log []string, transcriptPath string) model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask ABox Anything"
 	ta.Focus()
@@ -68,7 +70,7 @@ func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string)
 	ki.EchoCharacter = '•'
 	ki.Placeholder = "paste API key"
 	ki.Prompt = "key> "
-	return model{cfg: cfg, sel: sel, sandbox: sb, ta: ta, keyIn: ki, vmState: vmState}
+	return model{cfg: cfg, sel: sel, sandbox: sb, ta: ta, keyIn: ki, vmState: vmState, log: log, transcriptPath: transcriptPath}
 }
 
 func (m model) Init() tea.Cmd { return textarea.Blink }
@@ -187,12 +189,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLast(msg.Text)
 		case "tool":
 			m.log = append(m.log, formatToolLine(msg.Tool, msg.Status, msg.Text, msg.Err))
+			m.saveTranscript()
 		case "error":
 			m.err = msg.Err
 			m.log = append(m.log, "error: "+msg.Err)
 			m.busy = false
+			m.saveTranscript()
 		case "done":
 			m.busy = false
+			m.saveTranscript()
 		}
 		if m.events != nil && msg.Kind != "done" && msg.Kind != "error" {
 			return m, waitEvent(m.events)
@@ -202,9 +207,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.Error()
 		m.busy = false
 		m.log = append(m.log, "error: "+m.err)
+		m.saveTranscript()
 		return m, nil
 	case doneMsg:
 		m.busy = false
+		m.saveTranscript()
 		return m, nil
 	}
 	if m.mode == modeProviderKey || m.mode == modeMCPKey {
@@ -241,6 +248,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	}
 	m.ta.Reset()
 	m.log = append(m.log, "you: "+text, "")
+	m.saveTranscript()
 	m.busy = true
 	m.err = ""
 	ctx, cancel := context.WithCancel(context.Background())
@@ -277,6 +285,7 @@ func (m model) runSlash(text string) (tea.Model, tea.Cmd) {
 		for _, c := range slashCommands {
 			m.log = append(m.log, "  "+c.Name+"  "+c.Help)
 		}
+		m.saveTranscript()
 		return m, nil
 	default:
 		m.err = "unknown command " + name + "  (try /provider)"
@@ -346,6 +355,7 @@ func (m model) saveMCPKey() (tea.Model, tea.Cmd) {
 	}
 	m.err = ""
 	m.log = append(m.log, "mcp "+m.mcpPick.Name+" token saved  (OAuth: abox mcp login "+m.mcpPick.Name+")")
+	m.saveTranscript()
 	return m, nil
 }
 
@@ -374,6 +384,7 @@ func (m model) saveProviderKey() (tea.Model, tea.Cmd) {
 	}
 	m.err = ""
 	m.log = append(m.log, "connected "+m.provPick.Label+"  (agent in microVM)")
+	m.saveTranscript()
 	return m, nil
 }
 
@@ -385,6 +396,30 @@ func waitEvent(ch <-chan protocol.AgentEvent) tea.Cmd {
 		}
 		return evMsg(ev)
 	}
+}
+
+func (m model) saveTranscript() {
+	if m.transcriptPath == "" {
+		return
+	}
+	_ = session.WriteTranscript(m.transcriptPath, m.log)
+}
+
+func LogFromHistory(h []protocol.HistoryLine) []string {
+	var log []string
+	for _, line := range h {
+		switch line.Kind {
+		case "user":
+			log = append(log, "you: "+line.Text, "")
+		case "text":
+			if line.Text != "" {
+				log = append(log, line.Text)
+			}
+		case "tool":
+			log = append(log, formatToolLine(line.Tool, line.Status, line.Text, line.Err))
+		}
+	}
+	return log
 }
 
 func (m *model) appendLast(s string) {
@@ -561,8 +596,8 @@ func max(a, b int) int {
 	return b
 }
 
-func Run(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string) error {
-	p := tea.NewProgram(New(cfg, sel, sb, vmState))
+func Run(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string, log []string, transcriptPath string) error {
+	p := tea.NewProgram(New(cfg, sel, sb, vmState, log, transcriptPath))
 	_, err := p.Run()
 	return err
 }

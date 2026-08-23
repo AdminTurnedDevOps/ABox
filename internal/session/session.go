@@ -142,6 +142,36 @@ func (s *Session) GuestConfigJSON() string {
 	return filepath.Join(s.Dir, "guest-config.json")
 }
 
+func (s *Session) TranscriptPath() string {
+	return filepath.Join(s.Dir, "transcript.json")
+}
+
+func ReadTranscript(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var lines []string
+	if err := json.Unmarshal(data, &lines); err != nil {
+		return nil, err
+	}
+	return lines, nil
+}
+
+func WriteTranscript(path string, lines []string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(lines, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
 func (s *Session) WriteGuestConfig(model config.Model, secrets map[string]string, servers []config.MCPServer) error {
 	var gs []protocol.GuestMCPServer
 	for _, srv := range servers {

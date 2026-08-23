@@ -69,6 +69,7 @@ func run() error {
 		ImageID:    "abox-guest-dev",
 		Protocol:   protocol.Version,
 		GuestReady: true,
+		History:    loop.History(),
 	})
 	if err := protocol.WriteFrame(conn, protocol.Frame{ID: "hello", Method: "hello", Params: hello}); err != nil {
 		return err
@@ -136,6 +137,8 @@ func handle(loop *agent.Loop, repo tools.Repo, mcpMgr *guestmcp.Manager, archive
 	out := protocol.Frame{V: protocol.Version, ID: req.ID}
 	var err error
 	switch req.Method {
+	case "get_context":
+		out.Result, _ = protocol.EncodeParams(protocol.GetContextResult{History: loop.History()})
 	case "set_mcp_tokens":
 		p, e := protocol.DecodeParams[protocol.SetMCPTokensParams](req.Params)
 		if e != nil {

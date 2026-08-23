@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -147,6 +148,42 @@ func (l *Loop) LoadContext() error {
 	return nil
 }
 
+func (l *Loop) History() []protocol.HistoryLine {
+	return protocol.TrimHistory(HistoryFromMessages(l.Messages), protocol.MaxHistoryBytes)
+}
+
+func HistoryFromMessages(msgs []provider.Message) []protocol.HistoryLine {
+	var out []protocol.HistoryLine
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			if m.Content != "" {
+				out = append(out, protocol.HistoryLine{Kind: "user", Text: m.Content})
+			}
+		case "assistant":
+			if m.ToolName != "" {
+				out = append(out, protocol.HistoryLine{Kind: "tool", Tool: m.ToolName, Status: "ok"})
+			}
+			if m.Content != "" {
+				out = append(out, protocol.HistoryLine{Kind: "text", Text: m.Content})
+			}
+		case "tool":
+			if n := len(out); n > 0 && out[n-1].Kind == "tool" && out[n-1].Text == "" {
+				out[n-1].Text = truncate(m.ToolResult, 400)
+			}
+		}
+	}
+	return out
+}
+
+func HistoryFromContextJSON(data []byte) ([]protocol.HistoryLine, error) {
+	msgs, err := ParseMessages(data)
+	if err != nil {
+		return nil, err
+	}
+	return HistoryFromMessages(msgs), nil
+}
+
 func SaveMessages(path string, msgs []provider.Message) error {
 	if path == "" {
 		return fmt.Errorf("empty context path")
@@ -170,6 +207,14 @@ func LoadMessages(path string) ([]provider.Message, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	return ParseMessages(data)
+}
+
+func ParseMessages(data []byte) ([]provider.Message, error) {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil, nil
 	}
 	var msgs []provider.Message
 	if err := json.Unmarshal(data, &msgs); err != nil {
