@@ -2,8 +2,12 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
 
-func startVM(cfg VMMConfig) error {
+	"github.com/AdminTurnedDevOps/ABox/internal/vmmconfig"
+)
+
+func startVM(cfg vmmconfig.Config) error {
 	return fmt.Errorf("abox-vmm requires macOS on Apple Silicon with libkrun")
 }

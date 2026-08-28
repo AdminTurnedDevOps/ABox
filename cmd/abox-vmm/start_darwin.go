@@ -13,9 +13,11 @@ import "C"
 import (
 	"fmt"
 	"unsafe"
+
+	"github.com/AdminTurnedDevOps/ABox/internal/vmmconfig"
 )
 
-func startVM(cfg VMMConfig) error {
+func startVM(cfg vmmconfig.Config) error {
 	ctx := C.krun_create_ctx()
 	if ctx < 0 {
 		return fmt.Errorf("krun_create_ctx: %d", int(ctx))
