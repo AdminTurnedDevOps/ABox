@@ -14,6 +14,7 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/session"
+	"github.com/AdminTurnedDevOps/ABox/internal/vmmconfig"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 	"golang.org/x/sys/unix"
 )
@@ -25,17 +26,6 @@ type Sandbox struct {
 	conn    net.Conn
 	mu      sync.Mutex
 	nextID  int
-}
-
-type VMMConfig struct {
-	VCPU       uint8  `json:"vcpu"`
-	RAMMiB     uint32 `json:"ram_mib"`
-	RootDisk   string `json:"root_disk"`
-	ConfigDisk string `json:"config_disk"`
-	RPCSocket  string `json:"rpc_socket"`
-	VsockPort  uint32 `json:"vsock_port"`
-	ExecPath   string `json:"exec_path"`
-	ConsoleLog string `json:"console_log"`
 }
 
 func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string, mcpServers []config.MCPServer, resume bool) error {
@@ -98,7 +88,7 @@ func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int,
 		return nil, err
 	}
 
-	cfg := VMMConfig{
+	cfg := vmmconfig.Config{
 		VCPU:       uint8(vcpu),
 		RAMMiB:     uint32(ram),
 		RootDisk:   sess.RootDisk(),

@@ -5,18 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-)
 
-type VMMConfig struct {
-	VCPU       uint8  `json:"vcpu"`
-	RAMMiB     uint32 `json:"ram_mib"`
-	RootDisk   string `json:"root_disk"`
-	ConfigDisk string `json:"config_disk"`
-	RPCSocket  string `json:"rpc_socket"`
-	VsockPort  uint32 `json:"vsock_port"`
-	ExecPath   string `json:"exec_path"`
-	ConsoleLog string `json:"console_log"`
-}
+	"github.com/AdminTurnedDevOps/ABox/internal/vmmconfig"
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -30,7 +21,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
 	}
-	var cfg VMMConfig
+	var cfg vmmconfig.Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
