@@ -30,8 +30,8 @@ libkrun microVM on Apple Silicon, plus TUI and `/provider`.
 
 - Apple Silicon Mac
 - Go 1.24+
-- Docker (to pack the guest disk)
-- libkrun and libkrunfw
+- Docker (today: pack the guest **root filesystem** image only; not on the session path)
+- libkrun and libkrunfw (VMM + **guest Linux kernel**; the kernel is not inside the `.raw` disk)
 
 ```bash
 brew tap libkrun/krun
@@ -44,24 +44,65 @@ Confirm `kern.hv_support` is `1`.
 ## microVM > Docker
 
 `abox` does not run the agent in Docker. A session is a **libkrun microVM**:
-a Linux kernel and `abox-guest` on Apple Hypervisor.framework. The guest
-repo is a copy of your files on that VM disk, not a container mount.
+Linux kernel + `abox-guest` on Apple Hypervisor.framework. The guest repo is
+a copy of your files on that VM disk, not a container mount.
 
-Docker is used only when you pack the guest disk (`make image` /
-`make image-update`). After that, ABox boots the raw image with libkrun.
-No Docker daemon is on the session path.
+### Kernel vs disk
+
+The `.raw` file is **only a disk**: a 768 MiB ext4 **root filesystem**
+(userspace). Alpine base, `git`, `patch`, `/usr/local/bin/abox-guest`. No
+kernel, no bootloader, no hypervisor.
+
+The guest kernel comes from **libkrunfw** (Homebrew), not from that disk.
+`abox-vmm` links libkrun + libkrunfw, starts the VM, then attaches host files
+as virtio-blk:
+
+```text
+abox
+  → abox-vmm
+      → libkrun (userspace VMM)
+      → libkrunfw          ← Linux kernel
+      → Hypervisor.framework
+      → ARM virtualization
+
+host:  ~/.abox/sessions/<id>/root.raw     ordinary Mac file (ext4)
+         ↓ libkrun virtio-blk
+guest: /dev/vda                           block device
+         ↓ kernel mounts ext4 as /
+guest: /                                  Alpine + abox-guest + /work/repo
+
+host:  ~/.abox/sessions/<id>/config.raw   second file, read-only
+         ↓
+guest: /dev/vdb                           sealed session config
+```
+
+Swap the `.raw` and you change userspace. Swap libkrunfw and you change the
+guest kernel.
+
+### Docker packs that filesystem (today)
+
+Docker is used only to **build or patch** the golden root filesystem
+(`make image` / `make image-update`): a privileged Alpine container runs
+`apk`, `mkfs.ext4`, and copies `abox-guest`. After that, ABox boots with
+libkrun. No Docker daemon is on the session path.
+
+This is a packer, not isolation. A Mac cannot natively `apk --root` an ARM64
+Alpine tree or loop-mount ext4, which is why Docker is a prerequisite today.
+Replacing that packer (no daemon) is follow-up work. The session path does
+not depend on it.
 
 | Step | What runs |
 | --- | --- |
-| `make image` | Docker, to pack the golden disk |
-| `abox` / `--probe-vm` | `abox` + `abox-vmm` + libkrun VM |
+| `make image` | Docker, to pack the golden **root filesystem** (ext4 `.raw`) |
+| `make image-update` | Docker, to replace `/usr/local/bin/abox-guest` on that `.raw` |
+| `abox` / `--probe-vm` | `abox` + `abox-vmm` + libkrun + libkrunfw. No Docker. |
 
 Guest storage is files on the Mac, not a mount of your repo. Three files matter:
 
 | File | Role | Attached to the running VM? |
 | --- | --- | --- |
-| `~/.abox/images/abox-guest.raw` | **Golden image.** Alpine + git + patch + `abox-guest`. Clean template from `make image`. | No. Never opened read/write by a session. |
-| `~/.abox/sessions/<session-id>/root.raw` | **Session disk.** Clone of the golden image (APFS copy-on-write when available, else a full copy). This is the writable microVM hard drive (`/dev/vda`). Repo snapshot, `/work/repo`, guest Git, and anything the agent writes land here. | Yes. |
+| `~/.abox/images/abox-guest.raw` | **Golden root filesystem.** ext4 template: Alpine + git + patch + `abox-guest`. Not a kernel image. | No. Never opened read/write by a session. |
+| `~/.abox/sessions/<session-id>/root.raw` | **Session disk.** Clone of the golden image (APFS copy-on-write when available, else a full copy). Writable microVM hard drive (`/dev/vda` → `/`). Repo snapshot, `/work/repo`, guest Git, and anything the agent writes land here. | Yes. |
 | `~/.abox/sessions/<session-id>/config.raw` | **Sealed config.** ~1 MiB, mode `0400`, read-only. Session id, capability, model, API keys. Guest reads it as `/dev/vdb`. Not an OS image and not cloned from the golden disk. | Yes (read-only). |
 
 `~/.abox/sessions/<session-id>/root.raw` is a copy of the golden image/template to use within a running instance of ABox so a user can write to it, prompt, etc... The guest boots that file as its writable disk. Prompts, tools, /work/repo, patches, run_command all land there. The golden abox-guest.raw stays a clean template.
@@ -76,7 +117,10 @@ From this repo (or any directory). If Git is missing, dirty, or has no
 commits, ABox copies the files into a private snapshot and leaves your
 host Git alone.
 
-`make image`: uses Docker once to pack a raw Alpine disk (`~/.abox/images/abox-guest.raw` - the golden HD): base OS, git, patch, and abox-guest. Needed the first time, or when you want a full disk rebuild. Depends on `make guest`.
+`make image`: uses Docker once (today) to pack a raw ext4 root filesystem
+(`~/.abox/images/abox-guest.raw`): Alpine userspace, git, patch, and
+abox-guest. Not the guest kernel. Needed the first time, or when you want a
+full disk rebuild. Depends on `make guest`.
 
 `make build` compiles the three binaries into bin/:
 - `abox`: host TUI
