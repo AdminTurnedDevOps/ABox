@@ -11,7 +11,9 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 )
 
-var preferredOrder = []string{"XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
+func preferredOrder() []string {
+	return config.ProviderCredentialEnvs()
+}
 
 func Path() string {
 	return filepath.Join(config.AppSupportDir(), "credentials.env")
@@ -50,7 +52,7 @@ func Save(envName, value string) error {
 	if envName == "" {
 		return fmt.Errorf("empty credential name")
 	}
-	if !validCredName(envName) {
+	if !config.ValidEnvName(envName) {
 		return fmt.Errorf("invalid credential name %q", envName)
 	}
 	value = strings.TrimSpace(value)
@@ -77,7 +79,7 @@ func Save(envName, value string) error {
 			written[name] = struct{}{}
 		}
 	}
-	for _, name := range preferredOrder {
+	for _, name := range preferredOrder() {
 		write(name)
 	}
 	var rest []string
@@ -118,24 +120,6 @@ func ApplyToEnv() error {
 		}
 	}
 	return nil
-}
-
-func validCredName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		switch {
-		case r >= 'A' && r <= 'Z', r == '_':
-		case r >= '0' && r <= '9':
-			if i == 0 {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 func SetEnv(envName, value string) {

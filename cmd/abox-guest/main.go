@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/agent"
+	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/egress"
 	guestmcp "github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
@@ -53,7 +54,7 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "abox-guest: mcp: %v\n", err)
 	}
 	defer mcpMgr.Close()
-	loop := &agent.Loop{Model: agent.ModelFromGuest(cfg.Model), Repo: repo, MCP: mcpMgr, ContextFile: agent.DefaultContextFile}
+	loop := &agent.Loop{Model: config.ModelFromGuest(cfg.Model), Repo: repo, MCP: mcpMgr, ContextFile: agent.DefaultContextFile}
 	if err := loop.LoadContext(); err != nil {
 		fmt.Fprintf(os.Stderr, "abox-guest: context: %v\n", err)
 	}
@@ -158,65 +159,8 @@ func handle(loop *agent.Loop, repo tools.Repo, mcpMgr *guestmcp.Manager, archive
 			break
 		}
 		applySecrets(p.Secrets)
-		loop.Model = agent.ModelFromGuest(p.Model)
+		loop.Model = config.ModelFromGuest(p.Model)
 		out.Result, _ = protocol.EncodeParams(map[string]bool{"ok": true})
-	case "list_files":
-		p, e := protocol.DecodeParams[protocol.ListFilesParams](req.Params)
-		if e != nil {
-			err = e
-			break
-		}
-		paths, e := repo.List(p.Path, p.Depth, p.Limit)
-		if e != nil {
-			err = e
-			break
-		}
-		out.Result, _ = protocol.EncodeParams(protocol.ListFilesResult{Paths: paths})
-	case "read_file":
-		p, e := protocol.DecodeParams[protocol.ReadFileParams](req.Params)
-		if e != nil {
-			err = e
-			break
-		}
-		content, bin, trunc, e := repo.Read(p.Path, p.MaxBytes)
-		if e != nil {
-			err = e
-			break
-		}
-		out.Result, _ = protocol.EncodeParams(protocol.ReadFileResult{Content: content, Binary: bin, Trunc: trunc})
-	case "search":
-		p, e := protocol.DecodeParams[protocol.SearchParams](req.Params)
-		if e != nil {
-			err = e
-			break
-		}
-		matches, e := repo.Search(p.Query, p.Path, p.Limit)
-		if e != nil {
-			err = e
-			break
-		}
-		out.Result, _ = protocol.EncodeParams(protocol.SearchResult{Matches: matches})
-	case "apply_patch":
-		p, e := protocol.DecodeParams[protocol.ApplyPatchParams](req.Params)
-		if e != nil {
-			err = e
-			break
-		}
-		output, e := repo.ApplyPatch(p.Patch)
-		out.Result, _ = protocol.EncodeParams(protocol.ApplyPatchResult{OK: e == nil, Output: output})
-		err = e
-	case "run_command":
-		p, e := protocol.DecodeParams[protocol.RunCommandParams](req.Params)
-		if e != nil {
-			err = e
-			break
-		}
-		timeout := time.Duration(p.Timeout) * time.Second
-		exit, stdout, stderr, dur, trunc, e := repo.Run(p.Command, p.WorkDir, timeout, tools.DefaultMaxOutput)
-		out.Result, _ = protocol.EncodeParams(protocol.RunCommandResult{
-			ExitCode: exit, Stdout: stdout, Stderr: stderr, Duration: dur.String(), Trunc: trunc,
-		})
-		err = e
 	case "archive_chunk":
 		p, e := protocol.DecodeParams[protocol.ArchiveChunkParams](req.Params)
 		if e != nil {
@@ -262,6 +206,14 @@ func handle(loop *agent.Loop, repo tools.Repo, mcpMgr *guestmcp.Manager, archive
 		_ = loop.SaveContext()
 		out.Result, _ = protocol.EncodeParams(map[string]bool{"ok": true})
 	default:
+		if tools.IsBuiltin(req.Method) {
+			var result any
+			result, err = repo.CallBuiltin(req.Method, req.Params, 0)
+			if result != nil {
+				out.Result, _ = protocol.EncodeParams(result)
+			}
+			break
+		}
 		err = fmt.Errorf("unknown method %q", req.Method)
 	}
 	if err != nil {
@@ -316,7 +268,7 @@ func parseGuestConfig(data []byte) (protocol.GuestConfig, error) {
 		return cfg, err
 	}
 	if cfg.RepoDir == "" {
-		cfg.RepoDir = "/work/repo"
+		cfg.RepoDir = protocol.GuestRepoDir
 	}
 	if cfg.VsockPort == 0 {
 		cfg.VsockPort = protocol.RPCPort
@@ -329,7 +281,7 @@ func prepMounts() {
 	_ = os.MkdirAll("/sys", 0o755)
 	_ = os.MkdirAll("/dev", 0o755)
 	_ = os.MkdirAll("/tmp", 0o1777)
-	_ = os.MkdirAll("/work/repo", 0o755)
+	_ = os.MkdirAll(protocol.GuestRepoDir, 0o755)
 	_ = os.MkdirAll("/var/lib/abox", 0o755)
 	_ = mountIfNeeded("proc", "/proc")
 	_ = mountIfNeeded("sysfs", "/sys")

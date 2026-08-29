@@ -37,26 +37,12 @@ type Loop struct {
 }
 
 func BuiltinTools() []provider.ToolSchema {
-	obj := func(props map[string]any) map[string]any {
-		return map[string]any{"type": "object", "properties": props}
+	specs := tools.BuiltinSpecs()
+	out := make([]provider.ToolSchema, len(specs))
+	for i, s := range specs {
+		out[i] = provider.ToolSchema{Name: s.Name, Description: s.Description, Parameters: s.Parameters}
 	}
-	return []provider.ToolSchema{
-		{Name: "list_files", Description: "List paths in the guest repository", Parameters: obj(map[string]any{
-			"path": map[string]any{"type": "string"},
-		})},
-		{Name: "read_file", Description: "Read a file in the guest repository", Parameters: obj(map[string]any{
-			"path": map[string]any{"type": "string"},
-		})},
-		{Name: "search", Description: "Search the guest repository", Parameters: obj(map[string]any{
-			"query": map[string]any{"type": "string"},
-		})},
-		{Name: "apply_patch", Description: "Apply a unified diff in the guest repository", Parameters: obj(map[string]any{
-			"patch": map[string]any{"type": "string"},
-		})},
-		{Name: "run_command", Description: "Run a shell command in the guest", Parameters: obj(map[string]any{
-			"command": map[string]any{"type": "string"},
-		})},
-	}
+	return out
 }
 
 func (l *Loop) emit(e protocol.AgentEvent) {
@@ -284,68 +270,12 @@ func (l *Loop) execTool(ctx context.Context, ev provider.Event) (string, error) 
 		}
 		return l.MCP.Call(ctx, server, tool, json.RawMessage(ev.ToolArgs))
 	}
-	switch ev.ToolName {
-	case "list_files":
-		var args struct {
-			Path string `json:"path"`
-		}
-		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		paths, err := l.Repo.List(args.Path, 6, 500)
-		if err != nil {
-			return "", err
-		}
-		b, _ := json.Marshal(paths)
-		return string(b), nil
-	case "read_file":
-		var args struct {
-			Path string `json:"path"`
-		}
-		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		content, bin, _, err := l.Repo.Read(args.Path, 64<<10)
-		if err != nil {
-			return "", err
-		}
-		if bin {
-			return "[binary file]", nil
-		}
-		return content, nil
-	case "search":
-		var args struct {
-			Query string `json:"query"`
-		}
-		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		matches, err := l.Repo.Search(args.Query, ".", 40)
-		if err != nil {
-			return "", err
-		}
-		if len(matches) == 0 {
-			return "no matches", nil
-		}
-		b, _ := json.Marshal(matches)
-		return string(b), nil
-	case "apply_patch":
-		var args struct {
-			Patch string `json:"patch"`
-		}
-		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		return l.Repo.ApplyPatch(args.Patch)
-	case "run_command":
-		var args struct {
-			Command string `json:"command"`
-		}
-		_ = json.Unmarshal([]byte(ev.ToolArgs), &args)
-		timeout := 60 * time.Second
-		if deadline, ok := ctx.Deadline(); ok {
-			timeout = time.Until(deadline)
-		}
-		exit, stdout, stderr, _, _, err := l.Repo.Run(args.Command, "", timeout, tools.DefaultMaxOutput)
-		if err != nil && exit == -1 {
-			return "", err
-		}
-		return fmt.Sprintf("exit=%d\n%s\n%s", exit, stdout, stderr), nil
-	default:
-		return "", fmt.Errorf("unknown tool %q", ev.ToolName)
+	timeout := 60 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
 	}
+	result, err := l.Repo.CallTool(ev.ToolName, json.RawMessage(ev.ToolArgs), timeout)
+	return tools.FormatToolResult(result, err)
 }
 
 func truncate(s string, n int) string {
@@ -353,14 +283,4 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
-}
-
-func ModelFromGuest(m protocol.GuestModel) config.Model {
-	return config.Model{
-		Name:          m.Name,
-		Provider:      m.Provider,
-		Model:         m.Model,
-		CredentialEnv: m.CredentialEnv,
-		BaseURL:       m.BaseURL,
-	}
 }

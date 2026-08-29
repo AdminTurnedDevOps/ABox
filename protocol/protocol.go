@@ -15,6 +15,7 @@ const (
 	MaxArchiveChunk = 256 << 10
 	MaxHistoryBytes = 256 << 10
 	RPCPort         = 1024
+	GuestRepoDir    = "/work/repo"
 )
 
 // Frame is a length-prefixed JSON message.
@@ -48,13 +49,17 @@ type HelloParams struct {
 	History    []HistoryLine `json:"history,omitempty"`
 }
 
-type HistoryLine struct {
+// AgentEvent is a live or stored agent output line.
+type AgentEvent struct {
 	Kind   string `json:"kind"`
 	Text   string `json:"text,omitempty"`
 	Tool   string `json:"tool,omitempty"`
 	Status string `json:"status,omitempty"`
 	Err    string `json:"err,omitempty"`
 }
+
+// HistoryLine is persisted AgentEvent JSON (hello, get_context, transcripts).
+type HistoryLine = AgentEvent
 
 type GetContextResult struct {
 	History []HistoryLine `json:"history"`
@@ -172,14 +177,6 @@ type GuestModel struct {
 
 type UserTurnParams struct {
 	Text string `json:"text"`
-}
-
-type AgentEvent struct {
-	Kind   string `json:"kind"`
-	Text   string `json:"text,omitempty"`
-	Tool   string `json:"tool,omitempty"`
-	Status string `json:"status,omitempty"`
-	Err    string `json:"err,omitempty"`
 }
 
 type SetModelParams struct {

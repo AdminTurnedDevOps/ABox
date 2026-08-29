@@ -30,7 +30,7 @@ type Sandbox struct {
 
 func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string, mcpServers []config.MCPServer, resume bool) error {
 	if imagePath == "" {
-		imagePath = filepath.Join(config.ImageDir(), "abox-guest.raw")
+		imagePath = config.GuestImagePath()
 	}
 	if resume {
 		if _, err := os.Stat(sess.RootDisk()); err != nil {
@@ -95,7 +95,7 @@ func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int,
 		ConfigDisk: sess.ConfigDisk(),
 		RPCSocket:  sess.RPCSocket(),
 		VsockPort:  protocol.RPCPort,
-		ExecPath:   "/usr/local/bin/abox-guest",
+		ExecPath:   vmmconfig.DefaultExecPath,
 		ConsoleLog: sess.ConsoleLog(),
 	}
 	payload, err := json.Marshal(cfg)
@@ -263,13 +263,7 @@ func (s *Sandbox) SetMCPTokens(ctx context.Context, secrets map[string]string) e
 
 func (s *Sandbox) SetModel(ctx context.Context, model config.Model, secrets map[string]string) error {
 	return s.Call(ctx, "set_model", protocol.SetModelParams{
-		Model: protocol.GuestModel{
-			Name:          model.Name,
-			Provider:      model.Provider,
-			Model:         model.Model,
-			CredentialEnv: model.CredentialEnv,
-			BaseURL:       model.BaseURL,
-		},
+		Model:   model.ToGuest(),
 		Secrets: secrets,
 	}, nil)
 }

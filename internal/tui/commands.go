@@ -18,19 +18,8 @@ var slashCommands = []slashCmd{
 	{Name: "/help", Help: "List slash commands"},
 }
 
-type providerChoice struct {
-	Label    string
-	Provider string
-	Profile  string
-	Env      string
-}
-
-func providerChoices() []providerChoice {
-	return []providerChoice{
-		{Label: "Grok (xAI)", Provider: "xai", Profile: "grok-default", Env: "XAI_API_KEY"},
-		{Label: "OpenAI", Provider: "openai", Profile: "openai-default", Env: "OPENAI_API_KEY"},
-		{Label: "Anthropic", Provider: "anthropic", Profile: "claude-default", Env: "ANTHROPIC_API_KEY"},
-	}
+func providerChoices() []config.ProviderProfile {
+	return config.DefaultProviders()
 }
 
 func filterSlash(q string) []slashCmd {
@@ -64,18 +53,13 @@ func applyMCPKey(server config.MCPServer, key string) (string, error) {
 	return env, nil
 }
 
-func applyProviderKey(cfg config.File, choice providerChoice, key string) (config.Model, error) {
+func applyProviderKey(cfg config.File, choice config.ProviderProfile, key string) (config.Model, error) {
 	if err := credentials.Save(choice.Env, key); err != nil {
 		return config.Model{}, err
 	}
 	credentials.SetEnv(choice.Env, key)
-	if m, ok := cfg.ModelNamed(choice.Profile); ok {
+	if m, ok := cfg.ModelNamed(choice.Name); ok {
 		return m, nil
 	}
-	return config.Model{
-		Name:          choice.Profile,
-		Provider:      choice.Provider,
-		Model:         choice.Profile,
-		CredentialEnv: choice.Env,
-	}, nil
+	return choice.ModelConfig(), nil
 }

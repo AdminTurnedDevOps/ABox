@@ -113,13 +113,13 @@ func run() error {
 	vmState := "not-started"
 	image := cfg.Runtime.Image
 	if image == "" {
-		image = filepath.Join(config.ImageDir(), "abox-guest.raw")
+		image = config.GuestImagePath()
 	}
 	mcpServers, err := cfg.ResolvedMCPServers()
 	if err != nil {
 		return err
 	}
-	if err := runtime.Prepare(sess, image, sel, currentSecrets(cfg), mcpServers, *resume); err != nil {
+	if err := runtime.Prepare(sess, image, sel, cfg.SecretsFromEnv(), mcpServers, *resume); err != nil {
 		if execMode {
 			return err
 		}
@@ -128,13 +128,7 @@ func run() error {
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
-		vcpu, ram := cfg.Resources.VCPU, cfg.Resources.RAMMiB
-		if vcpu == 0 {
-			vcpu = 1
-		}
-		if ram == 0 {
-			ram = 768
-		}
+		vcpu, ram := cfg.Resources.Resolved()
 		started, err := runtime.Start(ctx, sess, cfg.Runtime.VMMPath, vcpu, ram)
 		if err != nil {
 			if execMode && *prompt != "" {
@@ -240,26 +234,6 @@ func loadResumeSession(wd, id string) (*session.Session, error) {
 		roots = append(roots, top)
 	}
 	return session.LatestForRepo(roots...)
-}
-
-func currentSecrets(cfg config.File) map[string]string {
-	out := map[string]string{}
-	for _, name := range []string{"XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
-		if v := os.Getenv(name); v != "" {
-			out[name] = v
-		}
-	}
-	servers, err := cfg.ResolvedMCPServers()
-	if err != nil {
-		return out
-	}
-	for _, s := range servers {
-		name := config.TokenEnv(s)
-		if v := os.Getenv(name); v != "" {
-			out[name] = v
-		}
-	}
-	return out
 }
 
 func runMCP(args []string) error {

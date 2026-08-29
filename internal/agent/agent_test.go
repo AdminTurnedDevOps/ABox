@@ -3,18 +3,23 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
+	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
 	"github.com/AdminTurnedDevOps/ABox/internal/provider"
 )
 
 func TestBuiltinToolNames(t *testing.T) {
-	tools := BuiltinTools()
-	if len(tools) != 5 {
-		t.Fatalf("want 5 tools, got %d", len(tools))
+	got := BuiltinTools()
+	if len(got) != 5 {
+		t.Fatalf("want 5 tools, got %d", len(got))
+	}
+	if got[0].Name != "list_files" || got[4].Name != "run_command" {
+		t.Fatalf("%q %q", got[0].Name, got[4].Name)
 	}
 }
 
@@ -115,6 +120,21 @@ func TestExecUnknownTool(t *testing.T) {
 	_, err := l.execTool(context.Background(), provider.Event{ToolName: "host_shell"})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestExecListFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loop{Repo: tools.Repo{Root: dir}}
+	out, err := l.execTool(context.Background(), provider.Event{ToolName: "list_files", ToolArgs: `{"path":"."}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != `["a.txt"]` {
+		t.Fatalf("out=%q", out)
 	}
 }
 
