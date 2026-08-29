@@ -25,18 +25,7 @@ func run() error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
-	if cfg.VCPU == 0 {
-		cfg.VCPU = 1
-	}
-	if cfg.RAMMiB == 0 {
-		cfg.RAMMiB = 768
-	}
-	if cfg.VsockPort == 0 {
-		cfg.VsockPort = 1024
-	}
-	if cfg.ExecPath == "" {
-		cfg.ExecPath = "/usr/local/bin/abox-guest"
-	}
+	cfg.ApplyDefaults()
 	if cfg.RootDisk == "" || cfg.RPCSocket == "" {
 		return fmt.Errorf("root_disk and rpc_socket are required")
 	}

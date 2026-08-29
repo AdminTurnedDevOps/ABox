@@ -9,8 +9,12 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/AdminTurnedDevOps/ABox/internal/vmmconfig"
+	"github.com/AdminTurnedDevOps/ABox/protocol"
 	"gopkg.in/yaml.v3"
 )
+
+const GuestImageName = "abox-guest.raw"
 
 type File struct {
 	Models       []Model      `yaml:"models"`
@@ -59,18 +63,14 @@ type Resources struct {
 
 func Defaults() File {
 	return File{
-		Models: []Model{
-			{Name: "grok-default", Provider: "xai", Model: "grok-4", CredentialEnv: "XAI_API_KEY", BaseURL: "https://api.x.ai/v1"},
-			{Name: "openai-default", Provider: "openai", Model: "gpt-4.1", CredentialEnv: "OPENAI_API_KEY", BaseURL: "https://api.openai.com/v1"},
-			{Name: "claude-default", Provider: "anthropic", Model: "claude-sonnet-4-20250514", CredentialEnv: "ANTHROPIC_API_KEY", BaseURL: "https://api.anthropic.com"},
-		},
+		Models:       defaultModels(),
 		Connectivity: Connectivity{Mode: "direct"},
 		Runtime: Runtime{
 			Isolation: "microvm",
 			Backend:   "libkrun",
 			Network:   "deny-by-default",
 		},
-		Resources: Resources{VCPU: 1, RAMMiB: 768},
+		Resources: Resources{VCPU: vmmconfig.DefaultVCPU, RAMMiB: vmmconfig.DefaultRAMMiB},
 	}
 }
 
@@ -199,7 +199,7 @@ func (s MCPServer) validate() error {
 	if err := validateHTTPSURL("url", s.URL); err != nil {
 		return err
 	}
-	if s.CredentialEnv != "" && !validEnvName(s.CredentialEnv) {
+	if s.CredentialEnv != "" && !ValidEnvName(s.CredentialEnv) {
 		return fmt.Errorf("invalid credential_env %q", s.CredentialEnv)
 	}
 	return nil
@@ -229,7 +229,7 @@ func validateHTTPSURL(field, raw string) error {
 	return nil
 }
 
-func validEnvName(name string) bool {
+func ValidEnvName(name string) bool {
 	if name == "" {
 		return false
 	}
@@ -245,6 +245,61 @@ func validEnvName(name string) bool {
 		}
 	}
 	return true
+}
+
+func (m Model) ToGuest() protocol.GuestModel {
+	return protocol.GuestModel{
+		Name:          m.Name,
+		Provider:      m.Provider,
+		Model:         m.Model,
+		CredentialEnv: m.CredentialEnv,
+		BaseURL:       m.BaseURL,
+	}
+}
+
+func ModelFromGuest(m protocol.GuestModel) Model {
+	return Model{
+		Name:          m.Name,
+		Provider:      m.Provider,
+		Model:         m.Model,
+		CredentialEnv: m.CredentialEnv,
+		BaseURL:       m.BaseURL,
+	}
+}
+
+func (r Resources) Resolved() (vcpu, ram int) {
+	vcpu, ram = r.VCPU, r.RAMMiB
+	if vcpu == 0 {
+		vcpu = vmmconfig.DefaultVCPU
+	}
+	if ram == 0 {
+		ram = vmmconfig.DefaultRAMMiB
+	}
+	return
+}
+
+func (c File) SecretsFromEnv() map[string]string {
+	out := map[string]string{}
+	for _, env := range ProviderCredentialEnvs() {
+		if v := os.Getenv(env); v != "" {
+			out[env] = v
+		}
+	}
+	servers, err := c.ResolvedMCPServers()
+	if err != nil {
+		return out
+	}
+	for _, s := range servers {
+		name := TokenEnv(s)
+		if v := os.Getenv(name); v != "" {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+func GuestImagePath() string {
+	return filepath.Join(ImageDir(), GuestImageName)
 }
 
 // ResolvedMCPServers returns the MCP URLs the guest may dial.
@@ -382,13 +437,13 @@ func CacheDir() string {
 
 func ImageDir() string {
 	modern := filepath.Join(Dir(), "images")
-	if exists(filepath.Join(modern, "abox-guest.raw")) {
+	if exists(filepath.Join(modern, GuestImageName)) {
 		return modern
 	}
 	home := homeDir()
 	if home != "" {
 		legacy := filepath.Join(home, "Library", "Caches", "ABox", "images")
-		if exists(filepath.Join(legacy, "abox-guest.raw")) {
+		if exists(filepath.Join(legacy, GuestImageName)) {
 			return legacy
 		}
 	}

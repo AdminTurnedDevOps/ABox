@@ -6,6 +6,55 @@ import (
 	"testing"
 )
 
+func TestModelGuestRoundTrip(t *testing.T) {
+	orig := Model{Name: "grok-default", Provider: "xai", Model: "grok-4", CredentialEnv: "XAI_API_KEY", BaseURL: "https://api.x.ai/v1"}
+	got := ModelFromGuest(orig.ToGuest())
+	if got != orig {
+		t.Fatalf("got %+v want %+v", got, orig)
+	}
+}
+
+func TestValidEnvName(t *testing.T) {
+	if !ValidEnvName("XAI_API_KEY") || !ValidEnvName("A1") || ValidEnvName("1A") || ValidEnvName("xai") || ValidEnvName("") {
+		t.Fatal("ValidEnvName mismatch")
+	}
+}
+
+func TestDefaultProvidersDriveDefaults(t *testing.T) {
+	cfg := Defaults()
+	ps := DefaultProviders()
+	if len(cfg.Models) != len(ps) {
+		t.Fatalf("models %d providers %d", len(cfg.Models), len(ps))
+	}
+	for i, p := range ps {
+		if cfg.Models[i] != p.ModelConfig() {
+			t.Fatalf("model[%d]=%+v want %+v", i, cfg.Models[i], p.ModelConfig())
+		}
+	}
+	if cfg.Resources.VCPU != 1 || cfg.Resources.RAMMiB != 768 {
+		t.Fatalf("resources %+v", cfg.Resources)
+	}
+	vcpu, ram := Resources{}.Resolved()
+	if vcpu != 1 || ram != 768 {
+		t.Fatalf("resolved %d %d", vcpu, ram)
+	}
+}
+
+func TestSecretsFromEnv(t *testing.T) {
+	t.Setenv("XAI_API_KEY", "xk")
+	t.Setenv("OPENAI_API_KEY", "")
+	c := Defaults()
+	c.MCPServers = []MCPServer{{Name: "gh", URL: "https://api.githubcopilot.com/mcp/", CredentialEnv: "ABOX_MCP_GH_TOKEN"}}
+	t.Setenv("ABOX_MCP_GH_TOKEN", "mt")
+	got := c.SecretsFromEnv()
+	if got["XAI_API_KEY"] != "xk" || got["ABOX_MCP_GH_TOKEN"] != "mt" {
+		t.Fatalf("%#v", got)
+	}
+	if _, ok := got["OPENAI_API_KEY"]; ok {
+		t.Fatalf("empty openai key leaked: %#v", got)
+	}
+}
+
 func TestValidateRejectsUnknownMode(t *testing.T) {
 	c := Defaults()
 	c.Connectivity.Mode = "wide-open"

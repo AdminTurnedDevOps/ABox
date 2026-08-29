@@ -37,7 +37,7 @@ type model struct {
 	mode           uiMode
 	slashSel       int
 	provSel        int
-	provPick       providerChoice
+	provPick       config.ProviderProfile
 	mcpSel         int
 	mcpPick        config.MCPServer
 	log            []string

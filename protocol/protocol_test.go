@@ -32,6 +32,14 @@ func TestTrimHistoryKeepsNewest(t *testing.T) {
 	}
 }
 
+func TestHistoryLineAliasesAgentEvent(t *testing.T) {
+	ev := AgentEvent{Kind: "text", Text: "hi", Tool: "search", Status: "ok", Err: "e"}
+	var line HistoryLine = ev
+	if line != ev {
+		t.Fatalf("got %+v want %+v", line, ev)
+	}
+}
+
 func TestRejectOversizedFrame(t *testing.T) {
 	var buf bytes.Buffer
 	buf.Write([]byte{0xff, 0xff, 0xff, 0xff})

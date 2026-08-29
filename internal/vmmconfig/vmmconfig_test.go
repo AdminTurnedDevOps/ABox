@@ -3,7 +3,17 @@ package vmmconfig
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
+
+func TestApplyDefaults(t *testing.T) {
+	var cfg Config
+	cfg.ApplyDefaults()
+	if cfg.VCPU != DefaultVCPU || cfg.RAMMiB != DefaultRAMMiB || cfg.ExecPath != DefaultExecPath || cfg.VsockPort != protocol.RPCPort {
+		t.Fatalf("%+v", cfg)
+	}
+}
 
 func TestConfigJSONRoundTrip(t *testing.T) {
 	orig := Config{
