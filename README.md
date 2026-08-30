@@ -97,17 +97,22 @@ not depend on it.
 | `make image-update` | Docker, to replace `/usr/local/bin/abox-guest` on that `.raw` |
 | `abox` / `--probe-vm` | `abox` + `abox-vmm` + libkrun + libkrunfw. No Docker. |
 
-Guest storage is files on the Mac, not a mount of your repo. Three files matter:
+1. Golden image — ~/.abox/images/abox-guest.raw
+Packed once (make image). Alpine + git + patch + abox-guest. Template only. Not attached to a running VM.
 
-| File | Role | Attached to the running VM? |
-| --- | --- | --- |
-| `~/.abox/images/abox-guest.raw` | **Golden root filesystem.** ext4 template: Alpine + git + patch + `abox-guest`. Not a kernel image. | No. Never opened read/write by a session. |
-| `~/.abox/sessions/<session-id>/root.raw` | **Session disk.** Clone of the golden image (APFS copy-on-write when available, else a full copy). Writable microVM hard drive (`/dev/vda` → `/`). Repo snapshot, `/work/repo`, guest Git, and anything the agent writes land here. | Yes. |
-| `~/.abox/sessions/<session-id>/config.raw` | **Sealed config.** ~1 MiB, mode `0400`, read-only. Session id, capability, model, API keys. Guest reads it as `/dev/vdb`. Not an OS image and not cloned from the golden disk. | Yes (read-only). |
+2. Session hard disk — ~/.abox/sessions/<id>/root.raw
+Clone of (1) for that run. This is /dev/vda → /. Repo, guest Git, agent writes. Destroy the session dir and this disk is gone; the golden stays.
+
+ABox does not boot (1). It copies (1) → (2), then the microVM uses (2). --resume skips the copy and boots the existing (2).
+
+3. Config disk — sessions/<id>/config.raw
+~1 MiB, read-only /dev/vdb. Session id, model, keys. Not cloned from the golden image, not an OS.
 
 `~/.abox/sessions/<session-id>/root.raw` is a copy of the golden image/template to use within a running instance of ABox so a user can write to it, prompt, etc... The guest boots that file as its writable disk. Prompts, tools, /work/repo, patches, run_command all land there. The golden abox-guest.raw stays a clean template.
 
 The VM boots **only** the session clone, not the golden file. Destroy a session directory and that run’s guest files are gone; the golden image stays clean for the next `abox`. `make image-update` patches `/usr/local/bin/abox-guest` on an existing golden disk; `make image` rebuilds the golden disk from scratch.
+
+### Resume Command
 
 `abox --resume` does **not** clone the golden image again. It boots the existing `root.raw` for that session and the guest reloads conversation state from `/var/lib/abox/context.json` on that disk. The TUI reloads the same transcript (host `transcript.json`, or the guest context if that file is missing). The host git tree is not re-copied (that would overwrite guest work).
 
