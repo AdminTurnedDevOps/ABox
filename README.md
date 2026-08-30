@@ -81,15 +81,9 @@ guest kernel.
 
 ### Docker packs that filesystem (today)
 
-Docker is used only to **build or patch** the golden root filesystem
-(`make image` / `make image-update`): a privileged Alpine container runs
-`apk`, `mkfs.ext4`, and copies `abox-guest`. After that, ABox boots with
-libkrun. No Docker daemon is on the session path.
-
-This is a packer, not isolation. A Mac cannot natively `apk --root` an ARM64
-Alpine tree or loop-mount ext4, which is why Docker is a prerequisite today.
-Replacing that packer (no daemon) is follow-up work. The session path does
-not depend on it.
+Docker is only the packer: a privileged container runs `apk` and `mkfs.ext4`
+because a Mac cannot build that ARM64 ext4 tree itself. Session boot does not
+use Docker. Replacing this packer is follow-up work.
 
 | Step | What runs |
 | --- | --- |
@@ -107,8 +101,6 @@ ABox does not boot (1). It copies (1) → (2), then the microVM uses (2). --resu
 
 3. Config disk — sessions/<id>/config.raw
 ~1 MiB, read-only /dev/vdb. Session id, model, keys. Not cloned from the golden image, not an OS.
-
-`~/.abox/sessions/<session-id>/root.raw` is a copy of the golden image/template to use within a running instance of ABox so a user can write to it, prompt, etc... The guest boots that file as its writable disk. Prompts, tools, /work/repo, patches, run_command all land there. The golden abox-guest.raw stays a clean template.
 
 The VM boots **only** the session clone, not the golden file. Destroy a session directory and that run’s guest files are gone; the golden image stays clean for the next `abox`. `make image-update` patches `/usr/local/bin/abox-guest` on an existing golden disk; `make image` rebuilds the golden disk from scratch.
 
