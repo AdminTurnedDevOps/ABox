@@ -1,5 +1,4 @@
-// Keep rem = 16px so $content-width / $nav-width / media queries stay
-// aligned. Theme otherwise sets html to 14px (mobile) or 16px (sm+).
+// rem stays 16px so layout vars in setup.scss map 1:1 to CSS pixels.
 html {
   font-size: 16px !important;
 }
@@ -11,37 +10,138 @@ body {
 .main-content {
   font-size: 18px;
   line-height: $content-line-height;
+  max-width: 56rem;
 }
 
-// Default inline code is 0.75em of body.
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+#toctitle,
+.site-title,
+.text-alpha,
+.text-beta,
+.text-gamma {
+  font-family: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  font-optical-sizing: auto;
+  letter-spacing: -0.03em;
+}
+
+h1,
+.text-alpha {
+  font-weight: 600 !important;
+}
+
+h2,
+h3 {
+  font-weight: 600;
+}
+
+.main-content h1:first-of-type {
+  margin-top: 0.15em;
+}
+
+.abox-lede {
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.45;
+  color: #dddbe8;
+  max-width: 36rem;
+  margin-top: 0.35rem;
+  margin-bottom: 1.75rem;
+}
+
+code,
+pre,
+.highlight,
+.text-mono {
+  font-family: $mono-font-family;
+}
+
 code {
   font-size: 0.9em;
   line-height: $body-line-height;
 }
 
+:not(pre, figure) > code {
+  background-color: rgba(114, 58, 206, 0.16);
+  border-color: #2c2942;
+}
+
 div.highlighter-rouge,
 div.listingblock > div.content,
 figure.highlight {
-  font-size: 16px;
-  line-height: 1.55;
+  font-size: 15px;
+  line-height: 1.6;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+}
+
+div.highlighter-rouge div.highlight {
+  padding: 1rem 1.15rem;
 }
 
 .highlight .table-wrapper td,
 .highlight .table-wrapper pre {
-  font-size: 15px !important;
+  font-size: 14px !important;
 }
 
-table {
-  font-size: 16px;
+// Theme sets th/td to fs-3 (~12–14px) and paints every cell.
+.main-content .table-wrapper {
+  box-shadow: none;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+}
+
+.main-content table th,
+.main-content table td {
+  font-size: 1rem !important;
+  background-color: transparent;
+  padding: 0.7rem 0.9rem;
+}
+
+.main-content table th {
+  font-family: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: $body-heading-color;
+  background-color: rgba(42, 24, 84, 0.4);
 }
 
 .nav-list .nav-list-item {
-  font-size: 16px !important;
+  font-size: 15px !important;
+  font-weight: 500;
+}
+
+.nav-list .nav-list-item .nav-list-link {
+  border-left: 2px solid transparent;
+}
+
+.nav-list .nav-list-item .nav-list-link:hover,
+.nav-list .nav-list-item .nav-list-link.active {
+  background-image: none;
+}
+
+.nav-list .nav-list-item .nav-list-link:hover {
+  background-color: rgba(114, 58, 206, 0.1);
+}
+
+.nav-list .nav-list-item .nav-list-link.active {
+  color: $link-color;
+  border-left-color: $link-color;
+  background-color: rgba(114, 58, 206, 0.12);
+}
+
+.nav-list .nav-list-item .nav-list-expander:hover {
+  background-image: none;
+  background-color: rgba(114, 58, 206, 0.1);
 }
 
 .nav-category {
-  font-size: 13px !important;
-  letter-spacing: 0.04em;
+  font-size: 12px !important;
+  letter-spacing: 0.08em;
 }
 
 .aux-nav,
@@ -50,17 +150,56 @@ table {
   font-size: 14px !important;
 }
 
+.aux-nav .site-button {
+  font-family: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: $link-color;
+}
+
 .search-input {
   font-size: 16px !important;
 }
 
 .site-title {
-  font-size: 1.25rem !important;
+  font-size: 1.15rem !important;
+  font-weight: 600;
+  gap: 0.65rem;
+}
+
+.site-title::before {
+  content: "";
+  display: block;
+  flex: 0 0 2rem;
+  width: 2rem;
+  height: 2rem;
+  background: url("../abox-mark.png") center / contain no-repeat;
 }
 
 .main-content-wrap {
   padding-top: 2rem;
-  padding-bottom: 3rem;
+  padding-bottom: 3.5rem;
+}
+
+// Host column stays 18rem. Theme otherwise grows the sidebar into
+// empty charcoal on wide screens and shrinks the page to a postage stamp.
+@media (min-width: 50rem) {
+  .side-bar {
+    width: $nav-width !important;
+    min-width: $nav-width;
+    align-items: stretch;
+  }
+
+  .side-bar + .main {
+    margin-left: $nav-width !important;
+    max-width: none;
+  }
+
+  .site-nav,
+  .site-header,
+  .site-footer {
+    width: 100%;
+  }
 }
 
 ::selection {
@@ -75,10 +214,11 @@ a:not([class]):hover {
 .search-input:focus,
 .search-input:focus-visible {
   outline: 2px solid $link-color;
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
-.nav-list .nav-list-item .nav-list-link.active {
-  color: $link-color;
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
 }
-

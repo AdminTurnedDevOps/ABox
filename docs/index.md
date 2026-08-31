@@ -12,7 +12,7 @@ redirect_from:
 {: .no_toc }
 
 Build an agent without putting the model loop on the host.
-{: .fs-6 .fw-300 }
+{: .abox-lede }
 
 The agent — prompt, provider HTTP, tools — runs in `abox-guest` inside a
 libkrun microVM. Your process is the supervisor: open a session, stream
