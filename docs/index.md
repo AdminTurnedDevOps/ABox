@@ -4,6 +4,8 @@ title: Overview
 nav_order: 1
 description: Embed a microVM-isolated agent in your Go program
 permalink: /
+redirect_from:
+  - /sdk/
 ---
 
 # ABox Go SDK
