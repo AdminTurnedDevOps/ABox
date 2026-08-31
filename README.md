@@ -17,7 +17,7 @@ The agent, prompts, model calls, and tools runs in isolation.
 
 <p align="center">
   <a href="#quickstart">Quick Start</a> ·
-  <a href="https://adminturneddevops.github.io/ABox/sdk/">SDK docs</a> ·
+  <a href="https://adminturneddevops.github.io/ABox/">SDK docs</a> ·
   <a href="PLAN.md">Plan</a> ·
   <a href="LICENSE">License</a>
 </p>
@@ -146,7 +146,10 @@ abox
 
 ## Go SDK
 
-Docs: **[Go SDK on GitHub Pages](https://adminturneddevops.github.io/ABox/sdk/)**.
+Docs: **[Go SDK on GitHub Pages](https://adminturneddevops.github.io/ABox/)**
+(overview, [quickstart](https://adminturneddevops.github.io/ABox/quickstart/),
+[examples](https://adminturneddevops.github.io/ABox/examples/),
+[troubleshooting](https://adminturneddevops.github.io/ABox/troubleshooting/)).
 
 ```go
 sess, err := abox.Open(ctx, abox.Options{})

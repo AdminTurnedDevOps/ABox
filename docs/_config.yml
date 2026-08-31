@@ -2,7 +2,31 @@ title: ABox
 description: Isolated agent harness — Go SDK
 url: https://adminturneddevops.github.io
 baseurl: /ABox
-theme: minima
-header_pages:
-  - sdk.md
-markdown: kramdown
+remote_theme: just-the-docs/just-the-docs@v0.10.2
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag
+color_scheme: abox
+search_enabled: true
+heading_anchors: true
+aux_links:
+  GitHub: https://github.com/AdminTurnedDevOps/ABox
+aux_links_new_tab: true
+footer_content: 'ABox is experimental. Isolation claims stay Planned until hardware tests in PLAN.md pass.'
+gh_edit_link: true
+gh_edit_link_text: Edit this page on GitHub
+gh_edit_repository: https://github.com/AdminTurnedDevOps/ABox
+gh_edit_branch: main
+gh_edit_source: docs
+gh_edit_view_mode: tree
+callouts_level: quiet
+callouts:
+  note:
+    title: Note
+    color: blue
+  warning:
+    title: Warning
+    color: yellow
+  important:
+    title: Isolation
+    color: red
