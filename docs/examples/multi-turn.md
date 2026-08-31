@@ -8,11 +8,12 @@ permalink: /examples/multi-turn/
 
 # Multi-turn
 
-Two `Turn`s on the same VM. Guest context persists for the process lifetime
-(and on `root.raw` after `Close`, for `Resume`).
+Two `Turn`s on the same VM. Guest context persists for the process lifetime (and on `root.raw` after `Close`, for `Resume`).
 
 ```bash
-go run ./examples/sdk-multi-turn
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-multi-turn@latest
 ```
 
-Repo: [`examples/sdk-multi-turn`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-multi-turn)
+```go
+{% include examples/sdk-multi-turn.go %}
+```

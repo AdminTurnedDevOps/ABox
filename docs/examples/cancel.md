@@ -8,11 +8,12 @@ permalink: /examples/cancel/
 
 # Cancel
 
-Requires protocol 2 (`Capabilities().Cancel`). A 3s turn deadline fires
-`cancel_turn`. In-flight `run_command` is killed.
+Requires protocol 2 (`Capabilities().Cancel`). A 3s turn deadline fires `cancel_turn`. In-flight `run_command` is killed.
 
 ```bash
-go run ./examples/sdk-cancel
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-cancel@latest
 ```
 
-Repo: [`examples/sdk-cancel`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-cancel)
+```go
+{% include examples/sdk-cancel.go %}
+```

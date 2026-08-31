@@ -8,9 +8,13 @@ permalink: /examples/read-file/
 
 # Read file
 
+Reads a guest path (default `README.md`).
+
 ```bash
-go run ./examples/sdk-read-file
-go run ./examples/sdk-read-file -- go.mod
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-read-file@latest
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-read-file@latest go.mod
 ```
 
-Repo: [`examples/sdk-read-file`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-read-file)
+```go
+{% include examples/sdk-read-file.go %}
+```

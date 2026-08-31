@@ -98,6 +98,98 @@ func TestUserTurnCtxCancelWritesCancelTurn(t *testing.T) {
 	}
 }
 
+func TestUserTurnCtxDeadlineWaitsForCanceledResponse(t *testing.T) {
+	host, guest := net.Pipe()
+	t.Cleanup(func() { host.Close(); guest.Close() })
+	s := &Sandbox{conn: host, GuestProtocol: 2}
+
+	guestDone := make(chan error, 1)
+	go func() {
+		turn, err := protocol.ReadFrame(guest)
+		if err != nil {
+			guestDone <- err
+			return
+		}
+		cancel, err := protocol.ReadFrame(guest)
+		if err != nil {
+			guestDone <- err
+			return
+		}
+		if cancel.Method != "cancel_turn" {
+			guestDone <- errors.New("expected cancel_turn")
+			return
+		}
+		guestDone <- protocol.WriteFrame(guest, protocol.Frame{
+			ID:    turn.ID,
+			Error: &protocol.Error{Code: "canceled", Message: "deadline exceeded"},
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	out, err := s.UserTurnCtx(ctx, "hi", TurnOptions{}, nil)
+	if guestErr := <-guestDone; guestErr != nil {
+		t.Fatalf("guest side: %v", guestErr)
+	}
+	if out == nil || !out.Canceled {
+		t.Fatalf("expected clean cancellation, err=%v out=%+v", err, out)
+	}
+	var rpcErr *protocol.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != "canceled" {
+		t.Fatalf("expected canceled RPC error, got %T %v", err, err)
+	}
+}
+
+func TestUserTurnCtxForwardsOptionsAndResult(t *testing.T) {
+	host, guest := net.Pipe()
+	t.Cleanup(func() { host.Close(); guest.Close() })
+	s := &Sandbox{conn: host, GuestProtocol: 2}
+
+	guestDone := make(chan error, 1)
+	go func() {
+		turn, err := protocol.ReadFrame(guest)
+		if err != nil {
+			guestDone <- err
+			return
+		}
+		params, err := protocol.DecodeParams[protocol.UserTurnParams](turn.Params)
+		if err != nil {
+			guestDone <- err
+			return
+		}
+		if params.Text != "inspect" || params.MaxTurns != 3 || params.TimeoutSec != 7 || !params.RichEvents {
+			guestDone <- errors.New("turn options were not forwarded")
+			return
+		}
+		result, _ := protocol.EncodeParams(protocol.AgentEvent{
+			Kind:       "result",
+			Usage:      &protocol.UsageInfo{InputTokens: 11, OutputTokens: 4},
+			StopReason: "end_turn",
+		})
+		if err := protocol.WriteFrame(guest, protocol.Frame{ID: turn.ID, Method: "agent_event", Params: result}); err != nil {
+			guestDone <- err
+			return
+		}
+		guestDone <- protocol.WriteFrame(guest, protocol.Frame{ID: turn.ID, Result: []byte(`{"ok":true}`)})
+	}()
+
+	var events []protocol.AgentEvent
+	out, err := s.UserTurnCtx(context.Background(), "inspect", TurnOptions{
+		MaxTurns: 3, TimeoutSec: 7, RichEvents: true,
+	}, func(ev protocol.AgentEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guestErr := <-guestDone; guestErr != nil {
+		t.Fatalf("guest side: %v", guestErr)
+	}
+	if len(events) != 1 || out.Usage == nil || out.Usage.InputTokens != 11 || out.StopReason != "end_turn" {
+		t.Fatalf("events=%+v out=%+v", events, out)
+	}
+}
+
 func TestWaitHelloStoresProtocol(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })

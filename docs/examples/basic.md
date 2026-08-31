@@ -8,14 +8,12 @@ permalink: /examples/basic/
 
 # Basic turn
 
-`Open`, one `Turn`, stream `text`, `Close` on exit. SIGINT cancels the process
-(protocol 2 also cancels the in-flight turn).
-
-Repo: [`examples/sdk-basic`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-basic)
+`Open`, one `Turn`, stream `text`, `Close` on exit. SIGINT cancels the process (protocol 2 also cancels the in-flight turn).
 
 ```bash
-export PATH="/path/to/ABox/bin:$PATH"
-go run ./examples/sdk-basic
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-basic@latest
 ```
 
-See [Quickstart]({{ '/quickstart' | relative_url }}) for the full listing.
+```go
+{% include examples/sdk-basic.go %}
+```

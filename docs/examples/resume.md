@@ -8,14 +8,13 @@ permalink: /examples/resume/
 
 # Resume
 
-Boots an existing `root.raw`. Empty id = latest session for this repo.
+Boots an existing `root.raw`. Empty id = latest session for this repo. The guest binary on that disk is whatever was cloned when the session was created. Protocol 2 features need a session opened after `make image-update`.
 
 ```bash
-go run ./examples/sdk-resume
-go run ./examples/sdk-resume -- fc519f5f063cc4d25c6f3f36c1e95152
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-resume@latest
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-resume@latest SESSION_ID
 ```
 
-Repo: [`examples/sdk-resume`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-resume)
-
-The guest binary on that disk is whatever was cloned when the session was
-created. Protocol 2 features need a session opened after `make image-update`.
+```go
+{% include examples/sdk-resume.go %}
+```

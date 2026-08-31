@@ -11,7 +11,9 @@ permalink: /examples/list-files/
 No model call. Same idea as `abox --probe-vm`.
 
 ```bash
-go run ./examples/sdk-list-files
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-list-files@latest
 ```
 
-Repo: [`examples/sdk-list-files`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-list-files)
+```go
+{% include examples/sdk-list-files.go %}
+```

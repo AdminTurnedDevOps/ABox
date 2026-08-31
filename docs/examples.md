@@ -8,12 +8,23 @@ permalink: /examples/
 
 # Examples
 
-Each program is a full `main` under `examples/` in the repo. Run from a git
-worktree with `abox-vmm` on `PATH` and a provider key (except probe examples).
+Each page is a full `main`. Run from any directory — you do not need an ABox
+checkout.
+
+`abox-vmm` must be on `PATH` (the `darwin_arm64` archive on the
+[GitHub release](https://github.com/AdminTurnedDevOps/ABox/releases)). Golden
+image and provider key: [Quickstart]({{ '/quickstart' | relative_url }}).
+Probe examples (`ListFiles`, `ReadFile`, `RunCommand`) do not need a key.
 
 ```bash
-export PATH="/path/to/ABox/bin:$PATH"
-go run ./examples/sdk-basic
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-basic@latest
+```
+
+Or copy the Go from a child page into `main.go` in your own module:
+
+```bash
+go get github.com/AdminTurnedDevOps/ABox@latest
+go run .
 ```
 
 | Example | What it shows |

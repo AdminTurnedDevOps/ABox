@@ -11,8 +11,10 @@ permalink: /examples/run-command/
 Guest `/bin/sh -c`. Default command: `uname -a && pwd && ls`.
 
 ```bash
-go run ./examples/sdk-run-command
-go run ./examples/sdk-run-command -- cat /etc/os-release
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-run-command@latest
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-run-command@latest cat /etc/os-release
 ```
 
-Repo: [`examples/sdk-run-command`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-run-command)
+```go
+{% include examples/sdk-run-command.go %}
+```

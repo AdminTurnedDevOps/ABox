@@ -8,11 +8,12 @@ permalink: /examples/errors/
 
 # Errors
 
-Demonstrates a missing golden image, then `ErrGuestTooOld` when the guest is
-v1 and `TurnOpts` is used.
+Demonstrates a missing golden image, then `ErrGuestTooOld` when the guest is v1 and `TurnOpts` is used.
 
 ```bash
-go run ./examples/sdk-errors
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-errors@latest
 ```
 
-Repo: [`examples/sdk-errors`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-errors)
+```go
+{% include examples/sdk-errors.go %}
+```

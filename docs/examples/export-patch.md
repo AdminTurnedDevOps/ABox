@@ -8,11 +8,12 @@ permalink: /examples/export-patch/
 
 # Export patch
 
-Asks the agent to add a file, then `ExportPatch` (guest `git diff` vs the
-imported baseline).
+Asks the agent to add a file, then `ExportPatch` (guest `git diff` vs the imported baseline).
 
 ```bash
-go run ./examples/sdk-export-patch
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-export-patch@latest
 ```
 
-Repo: [`examples/sdk-export-patch`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-export-patch)
+```go
+{% include examples/sdk-export-patch.go %}
+```

@@ -11,7 +11,9 @@ permalink: /examples/capabilities/
 Prints protocol and v2 flags. Exit 1 if the guest is still v1.
 
 ```bash
-go run ./examples/sdk-capabilities
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-capabilities@latest
 ```
 
-Repo: [`examples/sdk-capabilities`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-capabilities)
+```go
+{% include examples/sdk-capabilities.go %}
+```

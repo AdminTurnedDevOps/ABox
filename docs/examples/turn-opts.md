@@ -8,11 +8,12 @@ permalink: /examples/turn-opts/
 
 # Turn options
 
-`TurnOpts{MaxTurns, Timeout}` on a v2 guest. Prints usage when the provider
-sends it (OpenAI/Anthropic; xAI often nil).
+`TurnOpts{MaxTurns, Timeout}` on a v2 guest. Prints usage when the provider sends it (OpenAI/Anthropic; xAI often nil).
 
 ```bash
-go run ./examples/sdk-turn-opts
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-turn-opts@latest
 ```
 
-Repo: [`examples/sdk-turn-opts`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-turn-opts)
+```go
+{% include examples/sdk-turn-opts.go %}
+```

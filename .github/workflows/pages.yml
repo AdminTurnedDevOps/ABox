@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - docs/**
+      - examples/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -22,6 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Sync example sources
+        run: |
+          set -euo pipefail
+          mkdir -p docs/_includes/examples
+          for d in examples/sdk-*; do
+            cp "$d/main.go" "docs/_includes/examples/$(basename "$d").go"
+          done
       - uses: actions/configure-pages@v5
         with:
           enablement: true

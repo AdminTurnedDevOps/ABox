@@ -11,7 +11,9 @@ permalink: /examples/print-events/
 JSON-encodes every `Event` (same shape as `abox exec`).
 
 ```bash
-go run ./examples/sdk-print-events
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-print-events@latest
 ```
 
-Repo: [`examples/sdk-print-events`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-print-events)
+```go
+{% include examples/sdk-print-events.go %}
+```

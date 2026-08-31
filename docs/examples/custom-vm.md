@@ -11,7 +11,9 @@ permalink: /examples/custom-vm/
 Sets vCPU, RAM, boot timeout, and `VMMPath`. Lists files (no model).
 
 ```bash
-go run ./examples/sdk-custom-vm
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-custom-vm@latest
 ```
 
-Repo: [`examples/sdk-custom-vm`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-custom-vm)
+```go
+{% include examples/sdk-custom-vm.go %}
+```
