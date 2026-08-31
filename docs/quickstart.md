@@ -45,12 +45,14 @@ OpenAI / Anthropic).
 
 ## First program
 
+One import: `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Work from any git
+repo (the SDK snapshots that tree into the guest).
+
 ```bash
-cd /path/to/your/git/repo    # SDK snapshots this tree into the guest
-go run github.com/AdminTurnedDevOps/ABox/examples/sdk-basic@latest
+go get github.com/AdminTurnedDevOps/ABox@latest
 ```
 
-Or copy [`examples/sdk-basic`](https://github.com/AdminTurnedDevOps/ABox/tree/main/examples/sdk-basic):
+Copy this into `main.go`:
 
 ```go
 package main
@@ -90,19 +92,21 @@ func main() {
 ```
 
 ```bash
-export PATH="/path/to/ABox/bin:$PATH"   # abox-vmm
+export PATH="/path/to/abox-vmm-dir:$PATH"   # from the GitHub release archive
 go run .
 ```
 
 You should see `protocol 2` and a streamed sentence. `Close()` stops the VM.
 
-## Module import
+To try the same program without writing a file (still the ABox module, not a
+second SDK):
 
 ```bash
-go get github.com/AdminTurnedDevOps/ABox/pkg/abox
+go run github.com/AdminTurnedDevOps/ABox/examples/sdk-basic@latest
 ```
 
-`abox-vmm` must be on `PATH`, or set `Options.VMMPath`.
+`abox-vmm` must be on `PATH`, or set `Options.VMMPath`. More methods:
+[Examples]({{ '/examples' | relative_url }}).
 
 ## Next
 

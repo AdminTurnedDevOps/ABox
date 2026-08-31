@@ -10,6 +10,9 @@ permalink: /api/
 
 Package: `github.com/AdminTurnedDevOps/ABox/pkg/abox`
 
+This is the only public Go API. [Examples]({{ '/examples' | relative_url }})
+are sample `main` programs that call these methods — not extra packages.
+
 1. TOC
 {:toc}
 

@@ -23,6 +23,8 @@ import (
 // ErrGuestTooOld is returned when a v2-only operation is used against a v1 guest.
 var ErrGuestTooOld = errors.New("guest protocol too old")
 
+const cancelResponseTimeout = 5 * time.Second
+
 type TurnOptions struct {
 	MaxTurns   int
 	TimeoutSec int
@@ -237,9 +239,15 @@ func (s *Sandbox) Call(ctx context.Context, method string, params any, result an
 	if err := s.writeFrame(protocol.Frame{ID: id, Method: method, Params: raw}); err != nil {
 		return err
 	}
-	frame, err := protocol.ReadFrame(s.conn)
-	if err != nil {
-		return err
+	var frame protocol.Frame
+	for {
+		frame, err = protocol.ReadFrame(s.conn)
+		if err != nil {
+			return err
+		}
+		if frame.ID == id {
+			break
+		}
 	}
 	if frame.Error != nil {
 		return frame.Error
@@ -277,7 +285,10 @@ func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOpti
 	if err != nil {
 		return nil, err
 	}
-	if deadline, ok := ctx.Deadline(); ok {
+	supportsCancel := v2API && s.GuestProtocol >= 2
+	if supportsCancel {
+		defer s.conn.SetDeadline(time.Time{})
+	} else if deadline, ok := ctx.Deadline(); ok {
 		_ = s.conn.SetDeadline(deadline)
 		defer s.conn.SetDeadline(time.Time{})
 	}
@@ -288,7 +299,7 @@ func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOpti
 	var cancelOnce sync.Once
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
-	if v2API && s.GuestProtocol >= 2 {
+	if supportsCancel {
 		go func() {
 			select {
 			case <-ctx.Done():
@@ -298,6 +309,7 @@ func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOpti
 						return
 					}
 					_ = s.writeFrame(protocol.Frame{ID: id + "-cancel", Method: "cancel_turn", Params: raw})
+					_ = s.conn.SetReadDeadline(time.Now().Add(cancelResponseTimeout))
 				})
 			case <-stopWatch:
 			}
@@ -310,7 +322,7 @@ func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOpti
 		if err != nil {
 			return out, err
 		}
-		if frame.Method == "agent_event" {
+		if frame.Method == "agent_event" && frame.ID == id {
 			ev, err := protocol.DecodeParams[protocol.AgentEvent](frame.Params)
 			if err != nil {
 				return out, err

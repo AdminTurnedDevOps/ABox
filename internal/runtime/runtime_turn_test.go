@@ -119,7 +119,8 @@ func TestUserTurnCtxDeadlineWaitsForCanceledResponse(t *testing.T) {
 			guestDone <- errors.New("expected cancel_turn")
 			return
 		}
-		guestDone <- protocol.WriteFrame(guest, protocol.Frame{
+		guestDone <- nil
+		_ = protocol.WriteFrame(guest, protocol.Frame{
 			ID:    turn.ID,
 			Error: &protocol.Error{Code: "canceled", Message: "deadline exceeded"},
 		})
@@ -187,6 +188,70 @@ func TestUserTurnCtxForwardsOptionsAndResult(t *testing.T) {
 	}
 	if len(events) != 1 || out.Usage == nil || out.Usage.InputTokens != 11 || out.StopReason != "end_turn" {
 		t.Fatalf("events=%+v out=%+v", events, out)
+	}
+}
+
+func TestCallSkipsLateCancelResponse(t *testing.T) {
+	host, guest := net.Pipe()
+	t.Cleanup(func() { host.Close(); guest.Close() })
+	s := &Sandbox{conn: host, GuestProtocol: 2}
+	var guestWriteMu sync.Mutex
+	writeGuest := func(frame protocol.Frame) error {
+		guestWriteMu.Lock()
+		defer guestWriteMu.Unlock()
+		return protocol.WriteFrame(guest, frame)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	guestDone := make(chan error, 1)
+	go func() {
+		turn, err := protocol.ReadFrame(guest)
+		if err != nil {
+			guestDone <- err
+			return
+		}
+		cancel()
+		cancelFrame, err := protocol.ReadFrame(guest)
+		if err != nil {
+			guestDone <- err
+			return
+		}
+		if err := writeGuest(protocol.Frame{
+			ID: turn.ID, Error: &protocol.Error{Code: "canceled", Message: "canceled"},
+		}); err != nil {
+			guestDone <- err
+			return
+		}
+		ack, _ := protocol.EncodeParams(map[string]bool{"ok": true})
+		go func() {
+			_ = writeGuest(protocol.Frame{ID: cancelFrame.ID, Result: ack})
+		}()
+		call, err := protocol.ReadFrame(guest)
+		if err != nil {
+			guestDone <- err
+			return
+		}
+		result, _ := protocol.EncodeParams(struct {
+			Value string `json:"value"`
+		}{Value: "expected"})
+		guestDone <- nil
+		_ = writeGuest(protocol.Frame{ID: call.ID, Result: result})
+	}()
+
+	if _, err := s.UserTurnCtx(ctx, "hi", TurnOptions{}, nil); err == nil {
+		t.Fatal("expected canceled turn error")
+	}
+	var got struct {
+		Value string `json:"value"`
+	}
+	if err := s.Call(context.Background(), "next", map[string]bool{"ok": true}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if guestErr := <-guestDone; guestErr != nil {
+		t.Fatalf("guest side: %v", guestErr)
+	}
+	if got.Value != "expected" {
+		t.Fatalf("next call consumed the wrong response: %+v", got)
 	}
 }
 
