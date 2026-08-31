@@ -98,13 +98,6 @@ go run .
 
 You should see `protocol 2` and a streamed sentence. `Close()` stops the VM.
 
-To try the same program without writing a file (still the ABox module, not a
-second SDK):
-
-```bash
-go run github.com/AdminTurnedDevOps/ABox/examples/sdk-basic@latest
-```
-
 `abox-vmm` must be on `PATH`, or set `Options.VMMPath`. More methods:
 [Examples]({{ '/examples' | relative_url }}).
 

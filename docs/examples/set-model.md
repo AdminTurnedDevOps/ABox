@@ -8,19 +8,10 @@ permalink: /examples/set-model/
 
 # Set model
 
-One SDK: [`pkg/abox`]({{ '/api' | relative_url }}). This page is a sample program that calls `Session.SetModel`.
+`Session.SetModel` on the one SDK, [`pkg/abox`]({{ '/api' | relative_url }}).
 
-Switch profile after boot (`config.yaml` name). Default argument: `openai-default`. Needs that provider's key.
-
-Copy into your own `main.go` (`go get github.com/AdminTurnedDevOps/ABox@latest`):
+Switch profile after boot (`config.yaml` name). Default `openai-default`; pass another name as `os.Args[1]`. Needs that provider's key.
 
 ```go
 {% include examples/sdk-set-model.go %}
-```
-
-Optional: run this sample (same module as every other sample, not a second SDK):
-
-```bash
-go run github.com/AdminTurnedDevOps/ABox/examples/sdk-set-model@latest
-go run github.com/AdminTurnedDevOps/ABox/examples/sdk-set-model@latest grok-default
 ```

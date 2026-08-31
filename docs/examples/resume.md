@@ -8,19 +8,10 @@ permalink: /examples/resume/
 
 # Resume
 
-One SDK: [`pkg/abox`]({{ '/api' | relative_url }}). This page is a sample program that calls `abox.Resume`.
+`abox.Resume` on the one SDK, [`pkg/abox`]({{ '/api' | relative_url }}).
 
-Boots an existing `root.raw`. Empty id = latest session for this repo. The guest binary on that disk is whatever was cloned when the session was created. Protocol 2 features need a session opened after `make image-update`.
-
-Copy into your own `main.go` (`go get github.com/AdminTurnedDevOps/ABox@latest`):
+Boots an existing `root.raw`. Empty id = latest session for this repo (`go run .` with no args). Pass a session id as `os.Args[1]`. The guest binary on that disk is whatever was cloned when the session was created. Protocol 2 features need a session opened after `make image-update`.
 
 ```go
 {% include examples/sdk-resume.go %}
-```
-
-Optional: run this sample (same module as every other sample, not a second SDK):
-
-```bash
-go run github.com/AdminTurnedDevOps/ABox/examples/sdk-resume@latest
-go run github.com/AdminTurnedDevOps/ABox/examples/sdk-resume@latest SESSION_ID
 ```

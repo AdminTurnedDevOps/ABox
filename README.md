@@ -162,7 +162,7 @@ _, err = sess.Turn(ctx, "List the repo files", func(ev abox.Event) {
 
 Import `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Apple Silicon, libkrun,
 golden image. Resume of a pre-rebuild disk is protocol v1 (`ErrGuestTooOld` for
-cancel / turn options). Example: `examples/sdk-basic`.
+cancel / turn options).
 
 ## Release
 

@@ -25,13 +25,8 @@ sess, err := abox.Open(ctx, abox.Options{})
 // sess.ListFiles(ctx, ".", 4, 50)
 ```
 
-{: .note }
-`examples/sdk-*` in the repo are **sample programs** (`package main`) that call
-those methods. `go run …/examples/sdk-run-command@latest` still downloads the
-**same** ABox module (cached after the first run). It is not a second SDK.
-
-Each child page is one of those samples, inlined so you can copy it into your
-own `main.go`. `abox-vmm` on `PATH` (the `darwin_arm64` archive on the
+Each child page is a sample `main` that calls one of those methods. Copy it
+into your program. `abox-vmm` on `PATH` (the `darwin_arm64` archive on the
 [GitHub release](https://github.com/AdminTurnedDevOps/ABox/releases)). Golden
 image and provider key: [Quickstart]({{ '/quickstart' | relative_url }}).
 Probe methods do not need a key.

@@ -8,19 +8,10 @@ permalink: /examples/run-command/
 
 # Run command
 
-One SDK: [`pkg/abox`]({{ '/api' | relative_url }}). This page is a sample program that calls `Session.RunCommand`.
+`Session.RunCommand` on the one SDK, [`pkg/abox`]({{ '/api' | relative_url }}).
 
-Guest `/bin/sh -c`. Default command: `uname -a && pwd && ls`.
-
-Copy into your own `main.go` (`go get github.com/AdminTurnedDevOps/ABox@latest`):
+Guest `/bin/sh -c`. Default command: `uname -a && pwd && ls`. Extra args are the command (`go run . cat /etc/os-release`).
 
 ```go
 {% include examples/sdk-run-command.go %}
-```
-
-Optional: run this sample (same module as every other sample, not a second SDK):
-
-```bash
-go run github.com/AdminTurnedDevOps/ABox/examples/sdk-run-command@latest
-go run github.com/AdminTurnedDevOps/ABox/examples/sdk-run-command@latest cat /etc/os-release
 ```
