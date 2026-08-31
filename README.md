@@ -100,7 +100,7 @@ Clone of (1) for that run. This is /dev/vda → /. Repo, guest Git, agent writes
 ABox does not boot (1). It copies (1) → (2), then the microVM uses (2). --resume skips the copy and boots the existing (2).
 
 3. Config disk — sessions/<id>/config.raw
-~1 MiB, read-only /dev/vdb. Session id, model, keys. Not cloned from the golden image, not an OS.
+~1 MiB, read-only /dev/vdb. Session id, model, keys. Not cloned from the golden image, not an OS. It lives inside of the directory where your sandbox harness session lives.
 
 The VM boots **only** the session clone, not the golden file. Destroy a session directory and that run’s guest files are gone; the golden image stays clean for the next `abox`. `make image-update` patches `/usr/local/bin/abox-guest` on an existing golden disk; `make image` rebuilds the golden disk from scratch.
 
@@ -119,10 +119,16 @@ host Git alone.
 abox-guest. Not the guest kernel. Needed the first time, or when you want a
 full disk rebuild. Depends on `make guest`.
 
-`make build` compiles the three binaries into bin/:
-- `abox`: host TUI
-- abox-vmm: libkrun helper (codesigned for Hypervisor.framework)
-- abox-guest-linux-arm64: Linux agent, built for the VM (GOOS=linux GOARCH=arm64)
+`make build` compiles the three binaries into `bin/` (`abox`, `vmm`, and `guest`):
+
+| | `abox` | `vmm` |
+| --- | --- | --- |
+| Package | `./cmd/abox` | `./cmd/abox-vmm` |
+| Binary | TUI / CLI (supervisor) | libkrun helper |
+| Build | plain `go build` | cgo + libkrun/libkrunfw (Apple Silicon) |
+| Sign | no | yes — Hypervisor.framework entitlements |
+
+`guest` is `abox-guest-linux-arm64`: Linux agent, built for the VM (`GOOS=linux GOARCH=arm64`).
 
 ```bash
 make build
@@ -136,6 +142,15 @@ abox
 - `abox --resume` reopens the latest session for this repo (same `root.raw`, LLM conversation, and TUI transcript). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
 - `ctrl+c` quits
 - The agent runs only inside the guest (MicroVM)
+
+## Release
+
+GitHub → **Actions** → **Release** → **Run workflow**.
+
+- First run (no `v*` tags): creates **v1.0.0**
+- Later runs: reads the latest `v*` tag and bumps **patch** (`v1.0.0` → `v1.0.1`). Choose **minor** or **major**, or set **version** (e.g. `1.1.0`) to override
+- Apple Silicon runner builds `abox` + `abox-vmm` (adhoc codesign) and `abox-guest` (`linux/arm64`), then publishes a GitHub release with those files and `SHA256SUMS`
+- Does not pack the golden `.raw` (still `make image` locally; Docker)
 
 ## Test
 

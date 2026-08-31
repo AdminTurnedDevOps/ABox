@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Bump this component of the latest tag (ignored when Version is set, or when there are no tags yet)
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: Explicit version with no v prefix (for example 1.0.0). Leave empty to auto-bump. With no tags, the first release is 1.0.0.
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Require Apple Silicon
+        run: |
+          set -euo pipefail
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "abox-vmm must build on Apple Silicon; runner is $(uname -m)" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve next version
+        id: ver
+        env:
+          OVERRIDE: ${{ inputs.version }}
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          OVERRIDE="$(printf '%s' "$OVERRIDE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^v//')"
+
+          normalize() {
+            # 1 -> 1.0.0; 1.0 -> 1.0.0; 1.0.0 -> 1.0.0
+            local v="$1"
+            local a b c rest
+            a="${v%%.*}"
+            rest="${v#"$a"}"
+            rest="${rest#.}"
+            if [ -z "$rest" ]; then
+              echo "${a}.0.0"
+              return
+            fi
+            b="${rest%%.*}"
+            c="${rest#"$b"}"
+            c="${c#.}"
+            if [ -z "$c" ]; then
+              c=0
+            fi
+            echo "${a}.${b}.${c}"
+          }
+
+          if [ -n "$OVERRIDE" ]; then
+            VER="$(normalize "$OVERRIDE")"
+          else
+            LATEST="$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 || true)"
+            if [ -z "$LATEST" ]; then
+              VER="1.0.0"
+            else
+              CUR="$(normalize "${LATEST#v}")"
+              MA="${CUR%%.*}"
+              REST="${CUR#*.}"
+              MI="${REST%%.*}"
+              PA="${REST#*.}"
+              case "$BUMP" in
+                major)
+                  MA=$((MA + 1))
+                  MI=0
+                  PA=0
+                  ;;
+                minor)
+                  MI=$((MI + 1))
+                  PA=0
+                  ;;
+                patch | *)
+                  PA=$((PA + 1))
+                  ;;
+              esac
+              VER="${MA}.${MI}.${PA}"
+            fi
+          fi
+
+          TAG="v${VER}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "tag ${TAG} already exists" >&2
+            exit 1
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "next release ${TAG} (bump=${BUMP})"
+
+      - name: Test
+        run: make test
+
+      - name: Install libkrun
+        run: |
+          set -euo pipefail
+          brew tap libkrun/krun
+          brew trust libkrun/krun || true
+          brew install libkrun libkrunfw
+
+      - name: Build
+        run: make build
+
+      - name: Package
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -C bin -czf "dist/abox_${TAG}_darwin_arm64.tar.gz" abox abox-vmm
+          cp bin/abox-guest-linux-arm64 "dist/abox-guest_${TAG}_linux_arm64"
+          chmod 0755 "dist/abox-guest_${TAG}_linux_arm64"
+          (cd dist && shasum -a 256 * > SHA256SUMS)
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "ABox $TAG" \
+            --generate-notes \
+            --target "${GITHUB_SHA}" \
+            dist/abox_"${TAG}"_darwin_arm64.tar.gz \
+            dist/abox-guest_"${TAG}"_linux_arm64 \
+            dist/SHA256SUMS
