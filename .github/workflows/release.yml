@@ -74,10 +74,11 @@ jobs:
             echo "${a}.${b}.${c}"
           }
 
+          LATEST="$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 || true)"
+
           if [ -n "$OVERRIDE" ]; then
             VER="$(normalize "$OVERRIDE")"
           else
-            LATEST="$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 || true)"
             if [ -z "$LATEST" ]; then
               VER="1.0.0"
             else
@@ -111,7 +112,8 @@ jobs:
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "next release ${TAG} (bump=${BUMP})"
+          echo "previous=${LATEST}" >> "$GITHUB_OUTPUT"
+          echo "next release ${TAG} (bump=${BUMP} previous=${LATEST:-none})"
 
       - name: Test
         run: make test
@@ -147,11 +149,27 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
+          PREV: ${{ steps.ver.outputs.previous }}
         run: |
           set -euo pipefail
+          # GitHub --generate-notes lists merged PRs only. This repo
+          # ships from main commits, so notes are git log since PREV.
+          {
+            echo "## What's Changed"
+            echo
+            if [ -n "${PREV}" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "${PREV}..${GITHUB_SHA}"
+              echo
+              echo
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            else
+              git log --no-merges --pretty=format:'- %s (%h)' "${GITHUB_SHA}"
+              echo
+            fi
+          } > /tmp/release-notes.md
           gh release create "$TAG" \
             --title "ABox $TAG" \
-            --generate-notes \
+            --notes-file /tmp/release-notes.md \
             --target "${GITHUB_SHA}" \
             dist/abox_"${TAG}"_darwin_arm64.tar.gz \
             dist/abox-guest_"${TAG}"_linux_arm64 \
