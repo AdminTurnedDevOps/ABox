@@ -1,13 +1,18 @@
 @import "./color_schemes/dark";
 
-$body-background-color: #0b0c0e;
-$sidebar-color: #08090b;
-$border-color: #1c1e22;
-$body-text-color: #c8c6c1;
-$body-heading-color: #f2efe8;
-$nav-child-link-color: #9a9690;
-$link-color: #d4a24a;
-$btn-primary-color: #d4a24a;
-$code-background-color: #12141a;
-$base-button-color: #16181d;
-$search-result-preview-color: #9a9690;
+// From the ABox mark: near-black navy, cube violet #723ace / #6e3cd2.
+$body-background-color: #0f1119;
+$sidebar-color: #0b0c14;
+$border-color: #2c2942;
+$body-text-color: #c5c2d4;
+$body-heading-color: #f0eeff;
+$nav-child-link-color: #9b96b3;
+$link-color: #b794f6;
+$btn-primary-color: #723ace;
+$code-background-color: #151729;
+$code-linenumber-color: #c5c2d4;
+$base-button-color: #1a1c2c;
+$search-result-preview-color: #9b96b3;
+$search-background-color: #16182a;
+$table-background-color: #16182a;
+$feedback-color: #2a1854;

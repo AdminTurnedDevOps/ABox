@@ -62,3 +62,23 @@ table {
   padding-top: 2rem;
   padding-bottom: 3rem;
 }
+
+::selection {
+  background: rgba(114, 58, 206, 0.4);
+  color: #f0eeff;
+}
+
+a:not([class]):hover {
+  text-decoration-color: rgba($link-color, 0.7);
+}
+
+.search-input:focus,
+.search-input:focus-visible {
+  outline: 2px solid $link-color;
+  outline-offset: 1px;
+}
+
+.nav-list .nav-list-item .nav-list-link.active {
+  color: $link-color;
+}
+

@@ -24,7 +24,7 @@ callouts_level: quiet
 callouts:
   note:
     title: Note
-    color: blue
+    color: purple
   warning:
     title: Warning
     color: yellow
