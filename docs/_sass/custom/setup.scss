@@ -1,0 +1,29 @@
+// just-the-docs defaults: 50rem (~800px) column. Too narrow on desktop.
+// html is pinned to 16px in custom.scss so these rem values stay in px.
+// md stays at 50rem so the two-column layout still starts at ~800px.
+
+$content-width: 72rem;
+$nav-width: 18rem;
+$nav-width-md: 17rem;
+$header-height: 4rem;
+$search-results-width: $content-width - $nav-width;
+
+$media-queries: (
+  xs: 20rem,
+  sm: 31.25rem,
+  md: 50rem,
+  lg: $content-width + $nav-width,
+  xl: 96rem,
+);
+
+$font-size-2: 0.8125rem;
+$font-size-3: 0.9375rem;
+$font-size-6: 1.375rem;
+$font-size-7: 1.75rem;
+$font-size-8: 2.25rem;
+$font-size-9: 2.75rem;
+
+$body-line-height: 1.5;
+$content-line-height: 1.7;
+$nav-list-item-height: 2.25rem;
+$nav-list-item-height-sm: 3rem;

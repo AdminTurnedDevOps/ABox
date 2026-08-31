@@ -1,0 +1,64 @@
+// Keep rem = 16px so $content-width / $nav-width / media queries stay
+// aligned. Theme otherwise sets html to 14px (mobile) or 16px (sm+).
+html {
+  font-size: 16px !important;
+}
+
+body {
+  font-size: 18px;
+}
+
+.main-content {
+  font-size: 18px;
+  line-height: $content-line-height;
+}
+
+// Default inline code is 0.75em of body.
+code {
+  font-size: 0.9em;
+  line-height: $body-line-height;
+}
+
+div.highlighter-rouge,
+div.listingblock > div.content,
+figure.highlight {
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.highlight .table-wrapper td,
+.highlight .table-wrapper pre {
+  font-size: 15px !important;
+}
+
+table {
+  font-size: 16px;
+}
+
+.nav-list .nav-list-item {
+  font-size: 16px !important;
+}
+
+.nav-category {
+  font-size: 13px !important;
+  letter-spacing: 0.04em;
+}
+
+.aux-nav,
+.breadcrumb-nav-list-item,
+.site-footer {
+  font-size: 14px !important;
+}
+
+.search-input {
+  font-size: 16px !important;
+}
+
+.site-title {
+  font-size: 1.25rem !important;
+}
+
+.main-content-wrap {
+  padding-top: 2rem;
+  padding-bottom: 3rem;
+}
