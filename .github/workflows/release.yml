@@ -117,11 +117,17 @@ jobs:
         run: make test
 
       - name: Install libkrun
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
           set -euo pipefail
           brew tap libkrun/krun
           brew trust libkrun/krun || true
-          brew install libkrun libkrunfw
+          # The tap's libkrunfw Sequoia bottle URL 404s (brew asks for
+          # libkrunfw-64.*.bottle.1.tgz; the asset is libkrunfw-5.5.0.*).
+          # Formula "source" is already a prebuilt aarch64 tarball.
+          brew install --build-from-source libkrunfw
+          brew install libkrun
 
       - name: Build
         run: make build
