@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,13 +20,34 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ErrGuestTooOld is returned when a v2-only operation is used against a v1 guest.
+var ErrGuestTooOld = errors.New("guest protocol too old")
+
+type TurnOptions struct {
+	MaxTurns   int
+	TimeoutSec int
+	RichEvents bool
+}
+
+func (o TurnOptions) needsV2() bool {
+	return o.MaxTurns > 0 || o.TimeoutSec > 0 || o.RichEvents
+}
+
+type TurnOutcome struct {
+	Canceled   bool
+	Usage      *protocol.UsageInfo
+	StopReason string
+}
+
 type Sandbox struct {
-	Sess    *session.Session
-	History []protocol.HistoryLine
-	cmd     *exec.Cmd
-	conn    net.Conn
-	mu      sync.Mutex
-	nextID  int
+	Sess          *session.Session
+	History       []protocol.HistoryLine
+	GuestProtocol int
+	cmd           *exec.Cmd
+	conn          net.Conn
+	mu            sync.Mutex
+	writeMu       sync.Mutex
+	nextID        int
 }
 
 func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string, mcpServers []config.MCPServer, resume bool) error {
@@ -183,9 +205,20 @@ func (s *Sandbox) waitHello(ctx context.Context) error {
 	if err := protocol.WriteFrame(s.conn, protocol.Frame{ID: frame.ID, Result: ok}); err != nil {
 		return err
 	}
+	if hello.Protocol == 0 {
+		s.GuestProtocol = 1
+	} else {
+		s.GuestProtocol = hello.Protocol
+	}
 	s.History = hello.History
 	_ = s.conn.SetDeadline(time.Time{})
 	return nil
+}
+
+func (s *Sandbox) writeFrame(f protocol.Frame) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return protocol.WriteFrame(s.conn, f)
 }
 
 func (s *Sandbox) Call(ctx context.Context, method string, params any, result any) error {
@@ -201,7 +234,7 @@ func (s *Sandbox) Call(ctx context.Context, method string, params any, result an
 		_ = s.conn.SetDeadline(deadline)
 		defer s.conn.SetDeadline(time.Time{})
 	}
-	if err := protocol.WriteFrame(s.conn, protocol.Frame{ID: id, Method: method, Params: raw}); err != nil {
+	if err := s.writeFrame(protocol.Frame{ID: id, Method: method, Params: raw}); err != nil {
 		return err
 	}
 	frame, err := protocol.ReadFrame(s.conn)
@@ -218,30 +251,73 @@ func (s *Sandbox) Call(ctx context.Context, method string, params any, result an
 }
 
 func (s *Sandbox) UserTurn(ctx context.Context, text string, onEvent func(protocol.AgentEvent)) error {
+	_, err := s.userTurnLocked(ctx, text, TurnOptions{}, onEvent, false)
+	return err
+}
+
+func (s *Sandbox) UserTurnCtx(ctx context.Context, text string, opts TurnOptions, onEvent func(protocol.AgentEvent)) (*TurnOutcome, error) {
+	return s.userTurnLocked(ctx, text, opts, onEvent, true)
+}
+
+func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOptions, onEvent func(protocol.AgentEvent), v2API bool) (*TurnOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if v2API && opts.needsV2() && s.GuestProtocol < 2 {
+		return nil, fmt.Errorf("%w: need protocol 2, guest speaks %d", ErrGuestTooOld, s.GuestProtocol)
+	}
 	s.nextID++
 	id := fmt.Sprintf("%d", s.nextID)
-	raw, err := protocol.EncodeParams(protocol.UserTurnParams{Text: text})
+	params := protocol.UserTurnParams{Text: text}
+	if s.GuestProtocol >= 2 {
+		params.MaxTurns = opts.MaxTurns
+		params.TimeoutSec = opts.TimeoutSec
+		params.RichEvents = opts.RichEvents
+	}
+	raw, err := protocol.EncodeParams(params)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = s.conn.SetDeadline(deadline)
 		defer s.conn.SetDeadline(time.Time{})
 	}
-	if err := protocol.WriteFrame(s.conn, protocol.Frame{ID: id, Method: "user_turn", Params: raw}); err != nil {
-		return err
+	if err := s.writeFrame(protocol.Frame{ID: id, Method: "user_turn", Params: raw}); err != nil {
+		return nil, err
 	}
+
+	var cancelOnce sync.Once
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	if v2API && s.GuestProtocol >= 2 {
+		go func() {
+			select {
+			case <-ctx.Done():
+				cancelOnce.Do(func() {
+					raw, err := protocol.EncodeParams(protocol.CancelTurnParams{ID: id})
+					if err != nil {
+						return
+					}
+					_ = s.writeFrame(protocol.Frame{ID: id + "-cancel", Method: "cancel_turn", Params: raw})
+				})
+			case <-stopWatch:
+			}
+		}()
+	}
+
+	out := &TurnOutcome{}
 	for {
 		frame, err := protocol.ReadFrame(s.conn)
 		if err != nil {
-			return err
+			return out, err
 		}
 		if frame.Method == "agent_event" {
 			ev, err := protocol.DecodeParams[protocol.AgentEvent](frame.Params)
 			if err != nil {
-				return err
+				return out, err
+			}
+			if ev.Kind == "result" {
+				out.Usage = ev.Usage
+				out.StopReason = ev.StopReason
 			}
 			if onEvent != nil {
 				onEvent(ev)
@@ -250,9 +326,13 @@ func (s *Sandbox) UserTurn(ctx context.Context, text string, onEvent func(protoc
 		}
 		if frame.ID == id {
 			if frame.Error != nil {
-				return frame.Error
+				if frame.Error.Code == "canceled" {
+					out.Canceled = true
+					return out, frame.Error
+				}
+				return out, frame.Error
 			}
-			return nil
+			return out, nil
 		}
 	}
 }

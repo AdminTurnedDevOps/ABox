@@ -3,6 +3,7 @@ package tools
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -194,6 +195,10 @@ func (r Repo) ApplyPatch(patch string) (string, error) {
 }
 
 func (r Repo) Run(command, workdir string, timeout time.Duration, maxOut int) (exit int, stdout, stderr string, dur time.Duration, trunc bool, err error) {
+	return r.RunContext(context.Background(), command, workdir, timeout, maxOut)
+}
+
+func (r Repo) RunContext(ctx context.Context, command, workdir string, timeout time.Duration, maxOut int) (exit int, stdout, stderr string, dur time.Duration, trunc bool, err error) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
@@ -228,7 +233,7 @@ func (r Repo) Run(command, workdir string, timeout time.Duration, maxOut int) (e
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	start := time.Now()
-	err = runWithTimeout(cmd, timeout)
+	err = runWithContext(cmd, ctx, timeout)
 	dur = time.Since(start)
 	if cmd.ProcessState != nil {
 		exit = cmd.ProcessState.ExitCode()
@@ -390,17 +395,27 @@ func (l *limitedBuffer) Write(p []byte) (int, error) {
 func (l *limitedBuffer) String() string { return l.buf.String() }
 
 func runWithTimeout(cmd *exec.Cmd, d time.Duration) error {
+	return runWithContext(cmd, context.Background(), d)
+}
+
+func runWithContext(cmd *exec.Cmd, ctx context.Context, d time.Duration) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(d):
+	case <-timer.C:
 		_ = cmd.Process.Kill()
 		<-done
 		return fmt.Errorf("timeout after %s", d)
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		<-done
+		return ctx.Err()
 	}
 }

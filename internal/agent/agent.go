@@ -34,6 +34,8 @@ type Loop struct {
 	Messages    []provider.Message
 	ContextFile string
 	OnEvent     func(protocol.AgentEvent)
+	MaxTurns    int
+	Rich        bool
 }
 
 func BuiltinTools() []provider.ToolSchema {
@@ -58,8 +60,20 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 		return err
 	}
 	l.Messages = append(l.Messages, provider.Message{Role: "user", Content: user})
-	for i := 0; i < 16; i++ {
-		events, err := provider.Stream(ctx, l.Model, l.Messages, l.allTools())
+	limit := l.MaxTurns
+	if limit <= 0 {
+		limit = 16
+	}
+	var usage protocol.UsageInfo
+	stopReason := ""
+	for i := 0; i < limit; i++ {
+		var events <-chan provider.Event
+		var err error
+		if l.Rich {
+			events, err = provider.StreamWithUsage(ctx, l.Model, l.Messages, l.allTools())
+		} else {
+			events, err = provider.Stream(ctx, l.Model, l.Messages, l.allTools())
+		}
 		if err != nil {
 			l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
 			_ = l.SaveContext()
@@ -78,11 +92,31 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 				l.emit(protocol.AgentEvent{Kind: "error", Err: ev.Err.Error()})
 				_ = l.SaveContext()
 				return ev.Err
+			case "usage":
+				if ev.Usage != nil {
+					usage.InputTokens += ev.Usage.InputTokens
+					usage.OutputTokens += ev.Usage.OutputTokens
+				}
+				if ev.StopReason != "" {
+					stopReason = ev.StopReason
+				}
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			_ = l.SaveContext()
+			return err
 		}
 		if tool.ToolName == "" {
 			if text != "" {
 				l.Messages = append(l.Messages, provider.Message{Role: "assistant", Content: text})
+			}
+			if l.Rich {
+				ev := protocol.AgentEvent{Kind: "result", StopReason: stopReason}
+				if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+					u := usage
+					ev.Usage = &u
+				}
+				l.emit(ev)
 			}
 			l.emit(protocol.AgentEvent{Kind: "done"})
 			_ = l.SaveContext()
@@ -97,9 +131,19 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 		result, err := l.execTool(ctx, tool)
 		if err != nil {
 			result = "error: " + err.Error()
-			l.emit(protocol.AgentEvent{Kind: "tool", Tool: tool.ToolName, Status: "error", Err: err.Error()})
+			tev := protocol.AgentEvent{Kind: "tool", Tool: tool.ToolName, Status: "error", Err: err.Error()}
+			if l.Rich {
+				tev.ToolID = tool.ToolID
+				tev.ToolArgs = tool.ToolArgs
+			}
+			l.emit(tev)
 		} else {
-			l.emit(protocol.AgentEvent{Kind: "tool", Tool: tool.ToolName, Status: "ok", Text: truncate(result, 400)})
+			tev := protocol.AgentEvent{Kind: "tool", Tool: tool.ToolName, Status: "ok", Text: truncate(result, 400)}
+			if l.Rich {
+				tev.ToolID = tool.ToolID
+				tev.ToolArgs = tool.ToolArgs
+			}
+			l.emit(tev)
 		}
 		l.Messages = append(l.Messages, provider.Message{
 			Role:       "tool",
@@ -274,7 +318,7 @@ func (l *Loop) execTool(ctx context.Context, ev provider.Event) (string, error) 
 	if deadline, ok := ctx.Deadline(); ok {
 		timeout = time.Until(deadline)
 	}
-	result, err := l.Repo.CallTool(ev.ToolName, json.RawMessage(ev.ToolArgs), timeout)
+	result, err := l.Repo.CallToolCtx(ctx, ev.ToolName, json.RawMessage(ev.ToolArgs), timeout)
 	return tools.FormatToolResult(result, err)
 }
 

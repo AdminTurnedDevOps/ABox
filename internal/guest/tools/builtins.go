@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -63,15 +64,19 @@ func IsBuiltin(name string) bool {
 
 // CallBuiltin runs a host-guest RPC builtin. Empty params are an error.
 func (r Repo) CallBuiltin(name string, raw json.RawMessage, timeout time.Duration) (any, error) {
-	return r.call(name, raw, timeout, false)
+	return r.call(context.Background(), name, raw, timeout, false)
 }
 
 // CallTool runs a model-facing builtin. Empty or invalid JSON uses zero params plus agent defaults.
 func (r Repo) CallTool(name string, raw json.RawMessage, timeout time.Duration) (any, error) {
-	return r.call(name, raw, timeout, true)
+	return r.CallToolCtx(context.Background(), name, raw, timeout)
 }
 
-func (r Repo) call(name string, raw json.RawMessage, timeout time.Duration, agent bool) (any, error) {
+func (r Repo) CallToolCtx(ctx context.Context, name string, raw json.RawMessage, timeout time.Duration) (any, error) {
+	return r.call(ctx, name, raw, timeout, true)
+}
+
+func (r Repo) call(ctx context.Context, name string, raw json.RawMessage, timeout time.Duration, agent bool) (any, error) {
 	switch name {
 	case ListFiles:
 		p, err := unmarshalParams[protocol.ListFilesParams](raw, agent)
@@ -138,7 +143,7 @@ func (r Repo) call(name string, raw json.RawMessage, timeout time.Duration, agen
 		if to <= 0 && p.Timeout > 0 {
 			to = time.Duration(p.Timeout) * time.Second
 		}
-		exit, stdout, stderr, dur, trunc, err := r.Run(p.Command, p.WorkDir, to, DefaultMaxOutput)
+		exit, stdout, stderr, dur, trunc, err := r.RunContext(ctx, p.Command, p.WorkDir, to, DefaultMaxOutput)
 		return protocol.RunCommandResult{
 			ExitCode: exit, Stdout: stdout, Stderr: stderr, Duration: dur.String(), Trunc: trunc,
 		}, err

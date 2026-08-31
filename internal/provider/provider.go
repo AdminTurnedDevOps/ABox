@@ -13,15 +13,20 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/egress"
+	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
+var newHTTPClient = func() *http.Client { return egress.Client() }
+
 type Event struct {
-	Type     string
-	Text     string
-	ToolName string
-	ToolID   string
-	ToolArgs string
-	Err      error
+	Type       string
+	Text       string
+	ToolName   string
+	ToolID     string
+	ToolArgs   string
+	Err        error
+	Usage      *protocol.UsageInfo
+	StopReason string
 }
 
 type Message struct {
@@ -60,10 +65,35 @@ func Stream(ctx context.Context, model config.Model, messages []Message, tools [
 	if model.Provider == "anthropic" {
 		return streamAnthropic(ctx, model, key, messages, tools)
 	}
-	return streamOpenAICompat(ctx, base, key, model.Model, messages, tools)
+	return streamOpenAICompat(ctx, base, key, model.Model, messages, tools, false)
 }
 
-func streamOpenAICompat(ctx context.Context, base, key, model string, messages []Message, tools []ToolSchema) (<-chan Event, error) {
+func StreamWithUsage(ctx context.Context, model config.Model, messages []Message, tools []ToolSchema) (<-chan Event, error) {
+	key := strings.TrimSpace(os.Getenv(model.CredentialEnv))
+	if key == "" {
+		return nil, fmt.Errorf("missing credential %s", model.CredentialEnv)
+	}
+	base := strings.TrimRight(model.BaseURL, "/")
+	if base == "" {
+		switch model.Provider {
+		case "xai":
+			base = "https://api.x.ai/v1"
+		case "openai":
+			base = "https://api.openai.com/v1"
+		case "anthropic":
+			return streamAnthropic(ctx, model, key, messages, tools)
+		default:
+			return nil, fmt.Errorf("unsupported provider %q", model.Provider)
+		}
+	}
+	if model.Provider == "anthropic" {
+		return streamAnthropic(ctx, model, key, messages, tools)
+	}
+	includeUsage := model.Provider != "xai"
+	return streamOpenAICompat(ctx, base, key, model.Model, messages, tools, includeUsage)
+}
+
+func streamOpenAICompat(ctx context.Context, base, key, model string, messages []Message, tools []ToolSchema, includeUsage bool) (<-chan Event, error) {
 	var oaiMsgs []map[string]any
 	for _, m := range messages {
 		switch {
@@ -109,6 +139,9 @@ func streamOpenAICompat(ctx context.Context, base, key, model string, messages [
 		"messages": oaiMsgs,
 		"stream":   true,
 	}
+	if includeUsage {
+		body["stream_options"] = map[string]any{"include_usage": true}
+	}
 	if len(oaiTools) > 0 {
 		body["tools"] = oaiTools
 	}
@@ -119,8 +152,7 @@ func streamOpenAICompat(ctx context.Context, base, key, model string, messages [
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	client := egress.Client()
-	resp, err := client.Do(req)
+	resp, err := newHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -158,9 +190,19 @@ func streamOpenAICompat(ctx context.Context, base, key, model string, messages [
 						} `json:"tool_calls"`
 					} `json:"delta"`
 				} `json:"choices"`
+				Usage *struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+				} `json:"usage"`
 			}
 			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 				continue
+			}
+			if chunk.Usage != nil {
+				out <- Event{Type: "usage", Usage: &protocol.UsageInfo{
+					InputTokens:  chunk.Usage.PromptTokens,
+					OutputTokens: chunk.Usage.CompletionTokens,
+				}}
 			}
 			if len(chunk.Choices) == 0 {
 				continue
@@ -256,7 +298,7 @@ func streamAnthropic(ctx context.Context, model config.Model, key string, messag
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := egress.Client().Do(req)
+	resp, err := newHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -272,6 +314,8 @@ func streamAnthropic(ctx context.Context, model config.Model, key string, messag
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 		var toolID, toolName, toolArgs string
+		var usage protocol.UsageInfo
+		stopReason := ""
 		for sc.Scan() {
 			line := sc.Text()
 			if !strings.HasPrefix(line, "data:") {
@@ -297,7 +341,30 @@ func streamAnthropic(ctx context.Context, model config.Model, key string, messag
 					toolID, _ = block["id"].(string)
 					toolName, _ = block["name"].(string)
 				}
+			case "message_start":
+				if msg, _ := ev["message"].(map[string]any); msg != nil {
+					if u, _ := msg["usage"].(map[string]any); u != nil {
+						if n, ok := u["input_tokens"].(float64); ok {
+							usage.InputTokens = int(n)
+						}
+					}
+				}
+			case "message_delta":
+				if u, _ := ev["usage"].(map[string]any); u != nil {
+					if n, ok := u["output_tokens"].(float64); ok {
+						usage.OutputTokens = int(n)
+					}
+				}
+				if delta, _ := ev["delta"].(map[string]any); delta != nil {
+					if s, _ := delta["stop_reason"].(string); s != "" {
+						stopReason = s
+					}
+				}
 			}
+		}
+		if usage.InputTokens > 0 || usage.OutputTokens > 0 || stopReason != "" {
+			u := usage
+			out <- Event{Type: "usage", Usage: &u, StopReason: stopReason}
 		}
 		if toolName != "" {
 			out <- Event{Type: "tool", ToolID: toolID, ToolName: toolName, ToolArgs: toolArgs}

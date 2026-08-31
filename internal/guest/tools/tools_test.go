@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
@@ -55,6 +57,20 @@ func TestCallBuiltinAndTool(t *testing.T) {
 	none, err := FormatToolResult(r.CallTool(Search, []byte(`{"query":"zzz"}`), 0))
 	if err != nil || none != "no matches" {
 		t.Fatalf("search %q err=%v", none, err)
+	}
+}
+
+func TestRunContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	r := Repo{Root: dir}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	_, _, _, _, _, err := r.RunContext(ctx, "sleep 5", "", 10*time.Second, 1024)
+	if err == nil {
+		t.Fatal("expected cancel")
 	}
 }
 

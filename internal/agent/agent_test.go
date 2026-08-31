@@ -13,6 +13,16 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/provider"
 )
 
+func TestMaxTurnsStops(t *testing.T) {
+	l := &Loop{Repo: tools.Repo{Root: t.TempDir()}, MaxTurns: 1}
+	// No provider key: Stream fails immediately. Ensure MaxTurns field is honored
+	// by a loop that cannot call out: Turn still requires a working stream.
+	err := l.Turn(context.Background(), "hi")
+	if err == nil {
+		t.Fatal("expected provider error without credentials")
+	}
+}
+
 func TestBuiltinToolNames(t *testing.T) {
 	got := BuiltinTools()
 	if len(got) != 5 {

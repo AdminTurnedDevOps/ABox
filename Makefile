@@ -32,7 +32,7 @@ image-update: guest
 	ABOX_IMAGE=$(IMAGE) sh images/update-guest-bin.sh
 
 test:
-	go test ./protocol ./internal/...
+	go test ./protocol ./internal/... ./pkg/...
 
 fmt:
 	gofmt -w ./cmd ./internal ./protocol

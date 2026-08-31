@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/agent"
@@ -83,6 +85,8 @@ func run() error {
 		return ack.Error
 	}
 
+	w := &connWriter{c: conn}
+	turns := &turnTracker{}
 	var archive bytes.Buffer
 	for {
 		frame, err := protocol.ReadFrame(conn)
@@ -92,38 +96,128 @@ func run() error {
 			}
 			return err
 		}
-		if frame.Method == "user_turn" {
-			if err := handleTurn(conn, loop, frame); err != nil {
+		switch frame.Method {
+		case "user_turn":
+			if !turns.start(frame.ID) {
+				_ = w.write(protocol.Frame{V: protocol.Version, ID: frame.ID, Error: &protocol.Error{Code: "guest", Message: "turn already in progress"}})
+				continue
+			}
+			go runTurn(w, turns, loop, frame)
+		case "cancel_turn":
+			p, e := protocol.DecodeParams[protocol.CancelTurnParams](frame.Params)
+			if e != nil {
+				_ = w.write(protocol.Frame{V: protocol.Version, ID: frame.ID, Error: &protocol.Error{Code: "guest", Message: e.Error()}})
+				continue
+			}
+			turns.cancel(p.ID)
+			ok, _ := protocol.EncodeParams(map[string]bool{"ok": true})
+			_ = w.write(protocol.Frame{V: protocol.Version, ID: frame.ID, Result: ok})
+		default:
+			resp := handle(loop, repo, mcpMgr, &archive, frame)
+			if err := w.write(resp); err != nil {
 				return err
 			}
-			continue
-		}
-		resp := handle(loop, repo, mcpMgr, &archive, frame)
-		if err := protocol.WriteFrame(conn, resp); err != nil {
-			return err
-		}
-		if frame.Method == "shutdown" {
-			return nil
+			if frame.Method == "shutdown" {
+				turns.cancelAll()
+				return nil
+			}
 		}
 	}
 }
 
-func handleTurn(conn net.Conn, loop *agent.Loop, req protocol.Frame) error {
+type connWriter struct {
+	mu sync.Mutex
+	c  net.Conn
+}
+
+func (w *connWriter) write(f protocol.Frame) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return protocol.WriteFrame(w.c, f)
+}
+
+type turnTracker struct {
+	mu     sync.Mutex
+	active string
+	stop   context.CancelFunc
+}
+
+func (t *turnTracker) start(id string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.active != "" {
+		return false
+	}
+	t.active = id
+	return true
+}
+
+func (t *turnTracker) setCancel(id string, cancel context.CancelFunc) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.active == id {
+		t.stop = cancel
+	}
+}
+
+func (t *turnTracker) cancel(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.active == id && t.stop != nil {
+		t.stop()
+	}
+}
+
+func (t *turnTracker) cancelAll() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stop != nil {
+		t.stop()
+	}
+}
+
+func (t *turnTracker) done(id string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.active == id {
+		t.active = ""
+		t.stop = nil
+	}
+}
+
+func runTurn(w *connWriter, turns *turnTracker, loop *agent.Loop, req protocol.Frame) {
+	defer turns.done(req.ID)
 	p, err := protocol.DecodeParams[protocol.UserTurnParams](req.Params)
 	if err != nil {
-		return protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Error: &protocol.Error{Code: "guest", Message: err.Error()}})
+		_ = w.write(protocol.Frame{ID: req.ID, Error: &protocol.Error{Code: "guest", Message: err.Error()}})
+		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if p.TimeoutSec > 0 {
+		var timeoutCancel context.CancelFunc
+		ctx, timeoutCancel = context.WithTimeout(ctx, time.Duration(p.TimeoutSec)*time.Second)
+		defer timeoutCancel()
+	}
+	turns.setCancel(req.ID, cancel)
+	loop.MaxTurns = p.MaxTurns
+	loop.Rich = p.RichEvents
 	loop.OnEvent = func(ev protocol.AgentEvent) {
 		raw, _ := protocol.EncodeParams(ev)
-		_ = protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Method: "agent_event", Params: raw})
+		_ = w.write(protocol.Frame{ID: req.ID, Method: "agent_event", Params: raw})
 	}
-	if err := loop.Turn(context.Background(), p.Text); err != nil {
+	if err := loop.Turn(ctx, p.Text); err != nil {
 		_ = loop.SaveContext()
-		return protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Error: &protocol.Error{Code: "agent", Message: err.Error()}})
+		code := "agent"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			code = "canceled"
+		}
+		_ = w.write(protocol.Frame{ID: req.ID, Error: &protocol.Error{Code: code, Message: err.Error()}})
+		return
 	}
 	_ = loop.SaveContext()
 	ok, _ := protocol.EncodeParams(map[string]bool{"ok": true})
-	return protocol.WriteFrame(conn, protocol.Frame{ID: req.ID, Result: ok})
+	_ = w.write(protocol.Frame{ID: req.ID, Result: ok})
 }
 
 func applySecrets(secrets map[string]string) {

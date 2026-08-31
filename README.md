@@ -17,6 +17,7 @@ The agent, prompts, model calls, and tools runs in isolation.
 
 <p align="center">
   <a href="#quickstart">Quick Start</a> ·
+  <a href="https://adminturneddevops.github.io/ABox/sdk/">SDK docs</a> ·
   <a href="PLAN.md">Plan</a> ·
   <a href="LICENSE">License</a>
 </p>
@@ -142,6 +143,23 @@ abox
 - `abox --resume` reopens the latest session for this repo (same `root.raw`, LLM conversation, and TUI transcript). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
 - `ctrl+c` quits
 - The agent runs only inside the guest (MicroVM)
+
+## Go SDK
+
+Docs: **[Go SDK on GitHub Pages](https://adminturneddevops.github.io/ABox/sdk/)**.
+
+```go
+sess, err := abox.Open(ctx, abox.Options{})
+if err != nil { log.Fatal(err) }
+defer sess.Close()
+_, err = sess.Turn(ctx, "List the repo files", func(ev abox.Event) {
+    if ev.Kind == "text" { fmt.Print(ev.Text) }
+})
+```
+
+Import `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Apple Silicon, libkrun,
+golden image. Resume of a pre-rebuild disk is protocol v1 (`ErrGuestTooOld` for
+cancel / turn options). Example: `examples/sdk-basic`.
 
 ## Release
 

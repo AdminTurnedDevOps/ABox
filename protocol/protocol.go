@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	Version         = 1
+	Version         = 2
 	MaxFrameBytes   = 1 << 20
 	MaxArchiveChunk = 256 << 10
 	MaxHistoryBytes = 256 << 10
@@ -51,11 +51,20 @@ type HelloParams struct {
 
 // AgentEvent is a live or stored agent output line.
 type AgentEvent struct {
-	Kind   string `json:"kind"`
-	Text   string `json:"text,omitempty"`
-	Tool   string `json:"tool,omitempty"`
-	Status string `json:"status,omitempty"`
-	Err    string `json:"err,omitempty"`
+	Kind       string     `json:"kind"`
+	Text       string     `json:"text,omitempty"`
+	Tool       string     `json:"tool,omitempty"`
+	Status     string     `json:"status,omitempty"`
+	Err        string     `json:"err,omitempty"`
+	ToolID     string     `json:"tool_id,omitempty"`
+	ToolArgs   string     `json:"tool_args,omitempty"`
+	Usage      *UsageInfo `json:"usage,omitempty"`
+	StopReason string     `json:"stop_reason,omitempty"`
+}
+
+type UsageInfo struct {
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
 }
 
 // HistoryLine is persisted AgentEvent JSON (hello, get_context, transcripts).
@@ -176,7 +185,14 @@ type GuestModel struct {
 }
 
 type UserTurnParams struct {
-	Text string `json:"text"`
+	Text       string `json:"text"`
+	MaxTurns   int    `json:"max_turns,omitempty"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+	RichEvents bool   `json:"rich_events,omitempty"`
+}
+
+type CancelTurnParams struct {
+	ID string `json:"id"`
 }
 
 type SetModelParams struct {
