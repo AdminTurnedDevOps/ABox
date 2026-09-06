@@ -145,15 +145,6 @@ The VM boots **only** the session clone, not the golden file. Destroy a session 
 
 `abox --resume` does **not** clone the golden image again. It boots the existing `root.raw` for that session and the guest reloads conversation state from `/var/lib/abox/context.json` on that disk. The TUI reloads the same transcript (host `transcript.json`, or the guest context if that file is missing). The host git tree is not re-copied (that would overwrite guest work).
 
-## Release
-
-GitHub → **Actions** → **Release** → **Run workflow**.
-
-- First run (no `v*` tags): creates **v1.0.0**
-- Later runs: reads the latest `v*` tag and bumps **patch** (`v1.0.0` → `v1.0.1`). Choose **minor** or **major**, or set **version** (e.g. `1.1.0`) to override
-- Apple Silicon runner builds `abox` + `abox-vmm` (adhoc codesign) and `abox-guest` (`linux/arm64`), then publishes a GitHub release with those files, `SHA256SUMS`, and notes from `git log` since the previous tag (GitHub’s auto notes only list merged PRs)
-- Does not pack the golden `.raw` (still `make image` locally; Docker)
-
 ## Test
 
 1. Open `abox` on any terminal
