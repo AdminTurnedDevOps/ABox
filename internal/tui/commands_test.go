@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
@@ -103,6 +105,79 @@ func TestApplyMCPKeyFallbackReplacesExplicitNonEnvReference(t *testing.T) {
 	ref = persisted.MCPServers[0].Credential
 	if ref == nil || ref.Source != "env" || ref.Name != env {
 		t.Fatalf("persisted MCP server retained stale reference: %+v", persisted.MCPServers[0])
+	}
+}
+
+func TestApplyCloudCredentialWritesAzureRef(t *testing.T) {
+	t.Setenv("ABOX_HOME", t.TempDir())
+	cfg := config.Defaults()
+	choice := config.DefaultProviders()[2]
+	ref := config.CredentialRef{Source: "azure", Name: "https://testkv.vault.azure.net/secrets/anthropic"}
+	got, sel, note, err := applyCloudCredential(cfg, choice, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.CredentialEnv != "" || sel.Credential == nil || sel.Credential.Source != "azure" || sel.Credential.Name != ref.Name {
+		t.Fatalf("selected model %+v", sel)
+	}
+	if !strings.Contains(note, "az login") {
+		t.Fatalf("note %q", note)
+	}
+	persisted, _, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, ok := persisted.ModelNamed(choice.Name)
+	if !ok || model.Credential == nil || model.Credential.Source != "azure" || model.Credential.Name != ref.Name {
+		t.Fatalf("persisted %+v found=%v cfg=%+v", model, ok, got.Models)
+	}
+	body, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "sk-") || strings.Contains(string(body), "secret=") {
+		t.Fatalf("config contained a secret: %s", body)
+	}
+}
+
+func TestApplyCloudCredentialRejectsBadAzureURI(t *testing.T) {
+	t.Setenv("ABOX_HOME", t.TempDir())
+	cfg := config.Defaults()
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	choice := config.DefaultProviders()[2]
+	_, _, _, err := applyCloudCredential(cfg, choice, config.CredentialRef{
+		Source: "azure", Name: "https://evil.example/secrets/x",
+	})
+	if err == nil {
+		t.Fatal("expected invalid azure URI to fail")
+	}
+	body, err := os.ReadFile(config.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "evil.example") {
+		t.Fatalf("invalid ref was persisted: %s", body)
+	}
+}
+
+func TestApplyCloudCredentialAddsMissingProfile(t *testing.T) {
+	t.Setenv("ABOX_HOME", t.TempDir())
+	cfg := config.Defaults()
+	cfg.Models = cfg.Models[:1]
+	choice := config.DefaultProviders()[1]
+	got, sel, _, err := applyCloudCredential(cfg, choice, config.CredentialRef{
+		Source: "vault", Name: "secret/abox/openai",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.Name != choice.Name || sel.Credential == nil || sel.Credential.Source != "vault" {
+		t.Fatalf("selected %+v", sel)
+	}
+	if _, ok := got.ModelNamed(choice.Name); !ok {
+		t.Fatalf("config missing profile: %+v", got.Models)
 	}
 }
 

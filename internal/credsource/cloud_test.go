@@ -414,6 +414,9 @@ func TestAWSAccessDenied(t *testing.T) {
 }
 
 func TestAWSMissingCredentials(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "missing"))
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	_, err := testResolver().Resolve(context.Background(), Reference{Source: "aws", Name: "x"})
@@ -423,6 +426,8 @@ func TestAWSMissingCredentials(t *testing.T) {
 }
 
 func TestAWSMissingRegion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "missing"))
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "k")
 	t.Setenv("AWS_REGION", "")
@@ -430,6 +435,101 @@ func TestAWSMissingRegion(t *testing.T) {
 	_, err := testResolver().Resolve(context.Background(), Reference{Source: "aws", Name: "x"})
 	if err == nil || !strings.Contains(err.Error(), "AWS_REGION") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestAWSResolveFromSharedCredentials(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "credentials")
+	cfgFile := filepath.Join(dir, "config")
+	if err := os.WriteFile(credFile, []byte("[default]\naws_access_key_id = AKID-FILE\naws_secret_access_key = file-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgFile, []byte("[default]\nregion = us-west-2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", credFile)
+	t.Setenv("AWS_CONFIG_FILE", cfgFile)
+
+	var sawAuth string
+	newAWSServer(t, 200, `{"SecretString":"from-file"}`, func(r *http.Request, auth string) {
+		sawAuth = auth
+	})
+	v, err := testResolver().Resolve(context.Background(), Reference{Source: "aws", Name: "prod/anthropic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(v.Bytes) != "from-file" {
+		t.Fatalf("got %q", v.Bytes)
+	}
+	if !strings.Contains(sawAuth, "Credential=AKID-FILE/") || !strings.Contains(sawAuth, "us-west-2") {
+		t.Fatalf("auth %q", sawAuth)
+	}
+	if strings.Contains(sawAuth, "file-secret") {
+		t.Fatal("secret key leaked into Authorization")
+	}
+}
+
+func TestAWSEnvCredentialsBeatSharedFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "credentials"), []byte("[default]\naws_access_key_id = AKID-FILE\naws_secret_access_key = file-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(dir, "credentials"))
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKID-ENV")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "env-secret")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	var sawAuth string
+	newAWSServer(t, 200, `{"SecretString":"ok"}`, func(r *http.Request, auth string) {
+		sawAuth = auth
+	})
+	if _, err := testResolver().Resolve(context.Background(), Reference{Source: "aws", Name: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sawAuth, "Credential=AKID-ENV/") {
+		t.Fatalf("env credentials not used: %q", sawAuth)
+	}
+	if strings.Contains(sawAuth, "AKID-FILE") {
+		t.Fatalf("shared file leaked into env path: %q", sawAuth)
+	}
+}
+
+func TestAWSProfileFromSharedCredentials(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "credentials")
+	cfgFile := filepath.Join(dir, "config")
+	if err := os.WriteFile(credFile, []byte("[default]\naws_access_key_id = AKID-DEFAULT\naws_secret_access_key = default-secret\n\n[work]\naws_access_key_id = AKID-WORK\naws_secret_access_key = work-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgFile, []byte("[default]\nregion = us-east-1\n\n[profile work]\nregion = eu-central-1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	t.Setenv("AWS_SESSION_TOKEN", "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_PROFILE", "work")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", credFile)
+	t.Setenv("AWS_CONFIG_FILE", cfgFile)
+
+	var sawAuth string
+	newAWSServer(t, 200, `{"SecretString":"ok"}`, func(r *http.Request, auth string) {
+		sawAuth = auth
+	})
+	if _, err := testResolver().Resolve(context.Background(), Reference{Source: "aws", Name: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sawAuth, "Credential=AKID-WORK/") || !strings.Contains(sawAuth, "eu-central-1") {
+		t.Fatalf("auth %q", sawAuth)
 	}
 }
 

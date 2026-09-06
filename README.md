@@ -72,6 +72,7 @@ abox
 ```
 
 - `/provider` sets Grok, OpenAI, or Anthropic API keys
+- `/credential` points a model at Vault, Azure Key Vault, or AWS Secrets Manager
 - `/mcp` lists configured Streamable HTTP MCP servers and accepts a Bearer token (`abox mcp login` for OAuth)
 - `abox --resume` reopens the latest session for this repo (same `root.raw`, LLM conversation, and TUI transcript). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
 - `ctrl+c` quits
@@ -289,7 +290,7 @@ The following credential providers are supported (where your LLM API key lives):
 | `keychain` | macOS keychain account (service `abox`) | — |
 | `vault` | Vault KV v2 path (`secret/abox/anthropic`) | `VAULT_ADDR` + `VAULT_TOKEN` (or `~/.vault-token`) |
 | `azure` | Key Vault secret URI (`https://myvault.vault.azure.net/secrets/name`) | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, or `az login` |
-| `aws` | Secrets Manager secret id | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`AWS_REGION`) |
+| `aws` | Secrets Manager secret id | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`AWS_REGION`), or `~/.aws/credentials` |
 
 Config lives at `~/.abox/config.yaml`. Keys are **not** stored in that file. Each model or MCP server points at a source:
 
@@ -303,7 +304,7 @@ credential:
 
 `credential_env: XAI_API_KEY` is the same as `{source: env, name: XAI_API_KEY}`.
 
-`/provider` and `/mcp` in the TUI save to the macOS keychain first, falling back to `credentials.env` (mode 0600) if the keychain is locked or missing. `abox creds migrate` moves existing `credentials.env` entries into the keychain.
+`/provider` and `/mcp` in the TUI save to the macOS keychain first, falling back to `credentials.env` (mode 0600) if the keychain is locked or missing. `/credential` writes a Vault / Azure Key Vault / AWS Secrets Manager reference into `config.yaml` (it does not store cloud tokens). When the cloud auth env vars are unset, Azure uses the local `az login` session and AWS uses `~/.aws/credentials` (and region from `~/.aws/config`). `abox creds migrate` moves existing `credentials.env` entries into the keychain.
 
 LLM keys stay on the host. MCP tokens still go to the guest because the guest makes those HTTPS calls.
 

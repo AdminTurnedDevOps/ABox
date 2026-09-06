@@ -28,6 +28,9 @@ const (
 	modeProviderKey
 	modeMCPPick
 	modeMCPKey
+	modeCredSourcePick
+	modeCredModelPick
+	modeCredName
 )
 
 type model struct {
@@ -40,6 +43,8 @@ type model struct {
 	slashSel       int
 	provSel        int
 	provPick       config.ProviderProfile
+	credSourceSel  int
+	credSource     cloudCredSource
 	mcpSel         int
 	mcpPick        config.MCPServer
 	log            []string
@@ -136,6 +141,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			if m.mode != modeChat {
+				m.cancelCredInput()
 				m.mode = modeChat
 				m.keyIn.Blur()
 				m.ta.Focus()
@@ -150,6 +156,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "esc":
 			if m.mode != modeChat {
+				m.cancelCredInput()
 				m.mode = modeChat
 				m.keyIn.Blur()
 				m.ta.Focus()
@@ -163,7 +170,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.mode == modeProviderPick {
+			if m.mode == modeCredSourcePick {
+				if m.credSourceSel > 0 {
+					m.credSourceSel--
+				}
+				return m, nil
+			}
+			if m.mode == modeProviderPick || m.mode == modeCredModelPick {
 				if m.provSel > 0 {
 					m.provSel--
 				}
@@ -180,7 +193,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.mode == modeProviderPick {
+			if m.mode == modeCredSourcePick {
+				if m.credSourceSel < len(cloudCredentialChoices())-1 {
+					m.credSourceSel++
+				}
+				return m, nil
+			}
+			if m.mode == modeProviderPick || m.mode == modeCredModelPick {
 				if m.provSel < len(providerChoices())-1 {
 					m.provSel++
 				}
@@ -197,7 +216,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.mode == modeProviderPick {
+			if m.mode == modeCredSourcePick {
+				if m.credSourceSel > 0 {
+					m.credSourceSel--
+				}
+				return m, nil
+			}
+			if m.mode == modeProviderPick || m.mode == modeCredModelPick {
 				if m.provSel > 0 {
 					m.provSel--
 				}
@@ -210,7 +235,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.mode == modeProviderPick {
+			if m.mode == modeCredSourcePick {
+				if m.credSourceSel < len(cloudCredentialChoices())-1 {
+					m.credSourceSel++
+				}
+				return m, nil
+			}
+			if m.mode == modeProviderPick || m.mode == modeCredModelPick {
 				if m.provSel < len(providerChoices())-1 {
 					m.provSel++
 				}
@@ -225,6 +256,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.mode == modeProviderKey {
 				return m.saveProviderKey()
+			}
+			if m.mode == modeCredSourcePick {
+				return m.acceptCredSource()
+			}
+			if m.mode == modeCredModelPick {
+				return m.acceptCredModel()
+			}
+			if m.mode == modeCredName {
+				return m.saveCloudCredential()
 			}
 			if m.mode == modeMCPPick {
 				return m.acceptMCP()
@@ -277,7 +317,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.saveTranscript()
 		return m, nil
 	}
-	if m.mode == modeProviderKey || m.mode == modeMCPKey {
+	if m.mode == modeProviderKey || m.mode == modeMCPKey || m.mode == modeCredName {
 		var cmd tea.Cmd
 		m.keyIn, cmd = m.keyIn.Update(msg)
 		return m, cmd
@@ -341,6 +381,12 @@ func (m model) runSlash(text string) (tea.Model, tea.Cmd) {
 			return m, checkCredStatus(m.cfg, m.sel, m.resolver, false)
 		}
 		return m, nil
+	case "/credential":
+		m.mode = modeCredSourcePick
+		m.credSourceSel = 0
+		m.provSel = 0
+		m.err = ""
+		return m, nil
 	case "/mcp":
 		m.mode = modeMCPPick
 		m.mcpSel = 0
@@ -366,6 +412,75 @@ func slashExact(name string) bool {
 		}
 	}
 	return false
+}
+
+func (m *model) cancelCredInput() {
+	m.keyIn.SetValue("")
+	m.keyIn.EchoMode = textinput.EchoPassword
+	m.keyIn.EchoCharacter = '•'
+	m.keyIn.Placeholder = "paste API key"
+	m.keyIn.Prompt = "key> "
+}
+
+func (m model) acceptCredSource() (tea.Model, tea.Cmd) {
+	choices := cloudCredentialChoices()
+	if m.credSourceSel < 0 || m.credSourceSel >= len(choices) {
+		return m, nil
+	}
+	m.credSource = choices[m.credSourceSel]
+	m.mode = modeCredModelPick
+	m.provSel = 0
+	m.err = ""
+	return m, nil
+}
+
+func (m model) acceptCredModel() (tea.Model, tea.Cmd) {
+	choices := providerChoices()
+	if m.provSel < 0 || m.provSel >= len(choices) {
+		return m, nil
+	}
+	m.provPick = choices[m.provSel]
+	m.mode = modeCredName
+	m.keyIn.EchoMode = textinput.EchoNormal
+	m.keyIn.Placeholder = m.credSource.Placeholder
+	m.keyIn.Prompt = m.credSource.Prompt
+	m.keyIn.SetValue("")
+	m.keyIn.Focus()
+	m.ta.Blur()
+	m.err = ""
+	return m, textinput.Blink
+}
+
+func (m model) saveCloudCredential() (tea.Model, tea.Cmd) {
+	name := strings.TrimSpace(m.keyIn.Value())
+	m.cancelCredInput()
+	m.keyIn.Blur()
+	m.ta.Focus()
+	m.mode = modeChat
+	if name == "" {
+		m.err = "credential name is empty"
+		return m, nil
+	}
+	cfg, sel, note, err := applyCloudCredential(m.cfg, m.provPick, config.CredentialRef{
+		Source: m.credSource.Source, Name: name,
+	})
+	if err != nil {
+		m.err = err.Error()
+		return m, nil
+	}
+	m.cfg = cfg
+	if m.sandbox != nil {
+		m.updateHostBroker(cfg)
+		if err := m.sandbox.SetModel(context.Background(), sel, nil); err != nil {
+			m.err = "saved on host but guest agent update failed: " + err.Error()
+			return m, nil
+		}
+	}
+	m.sel = sel
+	m.err = ""
+	m.log = append(m.log, "credential "+m.provPick.Label+" -> "+m.credSource.Label+" "+name+"  ("+note+")")
+	m.saveTranscript()
+	return m, checkCredStatus(m.cfg, m.sel, m.resolver, false)
 }
 
 func (m model) acceptProvider() (tea.Model, tea.Cmd) {
@@ -539,7 +654,7 @@ func (m model) View() tea.View {
 	wrapped := wrapLog(m.log, wrapW)
 	body := strings.Join(tail(wrapped, bodyH), "\n")
 	if body == "" {
-		body = muted.Render("Type / for commands. /provider sets Grok, OpenAI, or Anthropic keys.")
+		body = muted.Render("Type / for commands.")
 	}
 
 	composer := m.ta.View()
@@ -563,6 +678,30 @@ func (m model) View() tea.View {
 		composer = b.String()
 	case modeProviderKey:
 		composer = "API key for " + m.provPick.Label + "\n" + m.keyIn.View()
+	case modeCredSourcePick:
+		var b strings.Builder
+		b.WriteString("Credential store  (reference only; tokens stay in the environment)\n")
+		for i, s := range cloudCredentialChoices() {
+			mark := "  "
+			if i == m.credSourceSel {
+				mark = "> "
+			}
+			b.WriteString(mark + s.Label + "\n")
+		}
+		composer = b.String()
+	case modeCredModelPick:
+		var b strings.Builder
+		b.WriteString("Model for " + m.credSource.Label + "\n")
+		for i, p := range providerChoices() {
+			mark := "  "
+			if i == m.provSel {
+				mark = "> "
+			}
+			b.WriteString(mark + p.Label + "\n")
+		}
+		composer = b.String()
+	case modeCredName:
+		composer = m.credSource.Label + " for " + m.provPick.Label + "\n" + m.keyIn.View()
 	case modeMCPPick:
 		servers := mcpServers(m.cfg)
 		var b strings.Builder

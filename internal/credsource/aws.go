@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -30,18 +31,9 @@ var newAWSClient = func() *http.Client {
 }
 
 func (awsSource) Resolve(ctx context.Context, ref Reference) (Value, error) {
-	accessKey := strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID"))
-	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	sessionToken := strings.TrimSpace(os.Getenv("AWS_SESSION_TOKEN"))
-	region := strings.TrimSpace(os.Getenv("AWS_REGION"))
-	if region == "" {
-		region = strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION"))
-	}
-	if accessKey == "" || secretKey == "" {
-		return Value{}, fmt.Errorf("%w: aws source requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY", ErrLocked)
-	}
-	if region == "" {
-		return Value{}, fmt.Errorf("aws source requires AWS_REGION or AWS_DEFAULT_REGION")
+	accessKey, secretKey, sessionToken, region, err := awsAuth()
+	if err != nil {
+		return Value{}, err
 	}
 	host := fmt.Sprintf("%s.%s.amazonaws.com", awsService, region)
 	reqURL := "https://" + host + "/"
@@ -93,6 +85,101 @@ func (awsSource) Resolve(ctx context.Context, ref Reference) (Value, error) {
 }
 
 func (awsSource) Close() error { return nil }
+
+func awsAuth() (accessKey, secretKey, sessionToken, region string, err error) {
+	accessKey = strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID"))
+	secretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+	sessionToken = strings.TrimSpace(os.Getenv("AWS_SESSION_TOKEN"))
+	region = strings.TrimSpace(os.Getenv("AWS_REGION"))
+	if region == "" {
+		region = strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION"))
+	}
+	if accessKey == "" || strings.TrimSpace(secretKey) == "" {
+		var fileRegion string
+		accessKey, secretKey, sessionToken, fileRegion = awsSharedFileAuth()
+		if region == "" {
+			region = fileRegion
+		}
+	} else if region == "" {
+		_, _, _, region = awsSharedFileAuth()
+	}
+	if accessKey == "" || strings.TrimSpace(secretKey) == "" {
+		return "", "", "", "", fmt.Errorf("%w: aws source needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or ~/.aws/credentials", ErrLocked)
+	}
+	if region == "" {
+		return "", "", "", "", fmt.Errorf("aws source needs AWS_REGION or region in ~/.aws/config")
+	}
+	return accessKey, secretKey, sessionToken, region, nil
+}
+
+func awsSharedFileAuth() (accessKey, secretKey, sessionToken, region string) {
+	profile := strings.TrimSpace(os.Getenv("AWS_PROFILE"))
+	if profile == "" {
+		profile = "default"
+	}
+	home, _ := os.UserHomeDir()
+	credPath := strings.TrimSpace(os.Getenv("AWS_SHARED_CREDENTIALS_FILE"))
+	if credPath == "" && home != "" {
+		credPath = filepath.Join(home, ".aws", "credentials")
+	}
+	configPath := strings.TrimSpace(os.Getenv("AWS_CONFIG_FILE"))
+	if configPath == "" && home != "" {
+		configPath = filepath.Join(home, ".aws", "config")
+	}
+	if creds := parseAWSINIFile(credPath)[profile]; creds != nil {
+		accessKey = strings.TrimSpace(creds["aws_access_key_id"])
+		secretKey = creds["aws_secret_access_key"]
+		sessionToken = strings.TrimSpace(creds["aws_session_token"])
+	}
+	cfgSection := "default"
+	if profile != "default" {
+		cfgSection = "profile " + profile
+	}
+	if cfg := parseAWSINIFile(configPath)[cfgSection]; cfg != nil {
+		region = strings.TrimSpace(cfg["region"])
+	}
+	return accessKey, secretKey, sessionToken, region
+}
+
+func parseAWSINIFile(path string) map[string]map[string]string {
+	if path == "" {
+		return map[string]map[string]string{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]map[string]string{}
+	}
+	return parseAWSINI(string(data))
+}
+
+func parseAWSINI(data string) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	section := ""
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(line[1 : len(line)-1])
+			if out[section] == nil {
+				out[section] = map[string]string{}
+			}
+			continue
+		}
+		if section == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.ToLower(strings.TrimSpace(k))
+		v = strings.Trim(strings.TrimSpace(v), `"'`)
+		out[section][k] = v
+	}
+	return out
+}
 
 func awsFieldBytes(name, field, secretString string) (Value, error) {
 	if field == "" {
