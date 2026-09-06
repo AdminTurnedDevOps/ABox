@@ -144,26 +144,6 @@ abox
 - `ctrl+c` quits
 - The agent runs only inside the guest (MicroVM)
 
-## Go SDK
-
-Docs: **[Go SDK on GitHub Pages](https://adminturneddevops.github.io/ABox/)**
-(overview, [quickstart](https://adminturneddevops.github.io/ABox/quickstart/),
-[examples](https://adminturneddevops.github.io/ABox/examples/),
-[troubleshooting](https://adminturneddevops.github.io/ABox/troubleshooting/)).
-
-```go
-sess, err := abox.Open(ctx, abox.Options{})
-if err != nil { log.Fatal(err) }
-defer sess.Close()
-_, err = sess.Turn(ctx, "List the repo files", func(ev abox.Event) {
-    if ev.Kind == "text" { fmt.Print(ev.Text) }
-})
-```
-
-Import `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Apple Silicon, libkrun,
-golden image. Resume of a pre-rebuild disk is protocol v1 (`ErrGuestTooOld` for
-cancel / turn options).
-
 ## Release
 
 GitHub → **Actions** → **Release** → **Run workflow**.
@@ -380,6 +360,25 @@ What differs is who is allowed to be an origin.
 
 And this brings a huge difference which, with direct mode, you need to pass in a token/auth. With agentgateway mode, you handle OAuth/token Exchange/OBO via agentgateway policies, governance, and security implementations.
 
+## Go SDK
+
+Docs: **[Go SDK on GitHub Pages](https://adminturneddevops.github.io/ABox/)**
+(overview, [quickstart](https://adminturneddevops.github.io/ABox/quickstart/),
+[examples](https://adminturneddevops.github.io/ABox/examples/),
+[troubleshooting](https://adminturneddevops.github.io/ABox/troubleshooting/)).
+
+```go
+sess, err := abox.Open(ctx, abox.Options{})
+if err != nil { log.Fatal(err) }
+defer sess.Close()
+_, err = sess.Turn(ctx, "List the repo files", func(ev abox.Event) {
+    if ev.Kind == "text" { fmt.Print(ev.Text) }
+})
+```
+
+Import `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Apple Silicon, libkrun,
+golden image. Resume of a pre-rebuild disk is protocol v1 (`ErrGuestTooOld` for
+cancel / turn options).
 
 ## Why?
 
