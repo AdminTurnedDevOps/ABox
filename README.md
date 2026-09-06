@@ -293,6 +293,8 @@ LLM traffic does **not** take the MCP `connectivity.mode` path. Direct vs agentg
 
 ABox is an MCP **client**. Remote tools are Streamable HTTP. Stdio MCP is not implemented.
 
+![](img/abox-mcp-agentgateway.gif)
+
 Much like the LLM integration, you need the ability to control, secure, govern, MCP, along with isolate what MCP Servers can be used. That's why `Streamable HTTP` makes the most sense.
 
 ```go
