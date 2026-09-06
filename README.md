@@ -46,6 +46,8 @@ From this repo (or any directory). If Git is missing, dirty, or has no
 commits, ABox copies the files into a private snapshot and leaves your
 host Git alone.
 
+![](img/abox-quickstart.gif)
+
 `make image`: uses Docker once (today) to pack a raw ext4 root filesystem
 (`~/.abox/images/abox-guest.raw`): Alpine userspace, git, patch, and
 abox-guest. Not the guest kernel. Needed the first time, or when you want a
