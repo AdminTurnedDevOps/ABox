@@ -3,8 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -13,6 +13,8 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
+	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
+	"github.com/AdminTurnedDevOps/ABox/internal/llmbroker"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
 	"github.com/AdminTurnedDevOps/ABox/internal/session"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
@@ -49,11 +51,23 @@ type model struct {
 	err            string
 	cancel         context.CancelFunc
 	events         <-chan protocol.AgentEvent
+	resolver       *credsource.Resolver
+	selKeyStatus   string
+	provKeyStatus  map[string]string
+	mcpKeyStatus   map[string]string
 }
 
 type evMsg protocol.AgentEvent
 type errMsg error
 type doneMsg struct{}
+
+// Presence is cached: the render path must not shell out to keychain or HTTP.
+type credStatusMsg struct {
+	sel     string
+	prov    map[string]string
+	mcp     map[string]string
+	partial bool
+}
 
 func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string, log []string, transcriptPath string) model {
 	ta := textarea.New()
@@ -73,7 +87,44 @@ func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string,
 	return model{cfg: cfg, sel: sel, sandbox: sb, ta: ta, keyIn: ki, vmState: vmState, log: log, transcriptPath: transcriptPath}
 }
 
-func (m model) Init() tea.Cmd { return textarea.Blink }
+func (m model) Init() tea.Cmd {
+	return tea.Batch(textarea.Blink, checkCredStatus(m.cfg, m.sel, m.resolver, false))
+}
+
+func checkCredStatus(cfg config.File, sel config.Model, r *credsource.Resolver, mcp bool) tea.Cmd {
+	if r == nil {
+		r = credsource.NewResolver()
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		msg := credStatusMsg{prov: map[string]string{}, mcp: map[string]string{}}
+		msg.sel = credStatusLabel(ctx, r, sel.CredentialReference())
+		for _, p := range providerChoices() {
+			model, ok := cfg.ModelNamed(p.Name)
+			if !ok {
+				model = p.ModelConfig()
+			}
+			msg.prov[p.Name] = credStatusLabel(ctx, r, model.CredentialReference())
+		}
+		if mcp {
+			for _, s := range mcpServers(cfg) {
+				msg.mcp[s.Name] = credStatusLabel(ctx, r, s.CredentialReference())
+			}
+			msg.partial = false
+		} else {
+			msg.partial = true
+		}
+		return msg
+	}
+}
+
+func credStatusLabel(ctx context.Context, r *credsource.Resolver, ref config.CredentialRef) string {
+	if credsource.Present(ctx, r, credsource.FromConfig(ref)) {
+		return "key ok"
+	}
+	return "no key"
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -183,6 +234,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.submit()
 		}
+	case credStatusMsg:
+		m.selKeyStatus = msg.sel
+		for name, status := range msg.prov {
+			if m.provKeyStatus == nil {
+				m.provKeyStatus = map[string]string{}
+			}
+			m.provKeyStatus[name] = status
+		}
+		if !msg.partial {
+			m.mcpKeyStatus = msg.mcp
+		}
+		return m, nil
 	case evMsg:
 		switch msg.Kind {
 		case "text":
@@ -274,12 +337,15 @@ func (m model) runSlash(text string) (tea.Model, tea.Cmd) {
 		m.mode = modeProviderPick
 		m.provSel = 0
 		m.err = ""
+		if len(m.provKeyStatus) == 0 {
+			return m, checkCredStatus(m.cfg, m.sel, m.resolver, false)
+		}
 		return m, nil
 	case "/mcp":
 		m.mode = modeMCPPick
 		m.mcpSel = 0
 		m.err = ""
-		return m, nil
+		return m, checkCredStatus(m.cfg, m.sel, m.resolver, true)
 	case "/help":
 		m.log = append(m.log, "commands:")
 		for _, c := range slashCommands {
@@ -338,7 +404,7 @@ func (m model) saveMCPKey() (tea.Model, tea.Cmd) {
 		m.err = "token is empty"
 		return m, nil
 	}
-	env, err := applyMCPKey(m.mcpPick, key)
+	cfg, env, note, err := applyMCPKey(m.cfg, m.mcpPick, key)
 	m.keyIn.SetValue("")
 	m.keyIn.Blur()
 	m.ta.Focus()
@@ -347,6 +413,8 @@ func (m model) saveMCPKey() (tea.Model, tea.Cmd) {
 		m.err = err.Error()
 		return m, nil
 	}
+	m.cfg = cfg
+	m.mcpKeyStatus = map[string]string{m.mcpPick.Name: "key ok"}
 	if m.sandbox != nil {
 		if err := m.sandbox.SetMCPTokens(context.Background(), map[string]string{env: key}); err != nil {
 			m.err = "saved on host but guest MCP update failed: " + err.Error()
@@ -354,7 +422,7 @@ func (m model) saveMCPKey() (tea.Model, tea.Cmd) {
 		}
 	}
 	m.err = ""
-	m.log = append(m.log, "mcp "+m.mcpPick.Name+" token saved  (OAuth: abox mcp login "+m.mcpPick.Name+")")
+	m.log = append(m.log, "mcp "+m.mcpPick.Name+" token saved ("+note+")  (OAuth: abox mcp login "+m.mcpPick.Name+")")
 	m.saveTranscript()
 	return m, nil
 }
@@ -365,7 +433,7 @@ func (m model) saveProviderKey() (tea.Model, tea.Cmd) {
 		m.err = "API key is empty"
 		return m, nil
 	}
-	sel, err := applyProviderKey(m.cfg, m.provPick, key)
+	cfg, sel, note, err := applyProviderKey(m.cfg, m.provPick, key)
 	m.keyIn.SetValue("")
 	m.keyIn.Blur()
 	m.ta.Focus()
@@ -374,18 +442,32 @@ func (m model) saveProviderKey() (tea.Model, tea.Cmd) {
 		m.err = err.Error()
 		return m, nil
 	}
-	m.sel = sel
+	m.cfg = cfg
 	if m.sandbox != nil {
+		// Refresh the broker even if the guest update fails so it is not stuck on startup config.
+		m.updateHostBroker(cfg)
 		secrets := map[string]string{m.provPick.Env: key}
 		if err := m.sandbox.SetModel(context.Background(), sel, secrets); err != nil {
 			m.err = "saved on host but guest agent update failed: " + err.Error()
 			return m, nil
 		}
 	}
+	m.sel = sel
+	m.selKeyStatus = "key ok"
+	if m.provKeyStatus == nil {
+		m.provKeyStatus = map[string]string{}
+	}
+	m.provKeyStatus[m.provPick.Name] = "key ok"
 	m.err = ""
-	m.log = append(m.log, "connected "+m.provPick.Label+"  (agent in microVM)")
+	m.log = append(m.log, "connected "+m.provPick.Label+"  ("+note+")")
 	m.saveTranscript()
 	return m, nil
+}
+
+func (m model) updateHostBroker(cfg config.File) {
+	if m.sandbox != nil {
+		m.sandbox.OnGuestCall = llmbroker.New(cfg, m.resolver)
+	}
 }
 
 func waitEvent(ch <-chan protocol.AgentEvent) tea.Cmd {
@@ -440,9 +522,9 @@ func (m model) View() tea.View {
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#71717A"))
 	bar := lipgloss.NewStyle().Foreground(lipgloss.Color("#F4F4F5")).Background(lipgloss.Color("#141416")).Padding(0, 1)
 
-	cred := "no key"
-	if m.sel.CredentialPresent() {
-		cred = "key ok"
+	cred := m.selKeyStatus
+	if cred == "" {
+		cred = "…"
 	}
 	header := bar.Render(fmt.Sprintf("ABox  %s/%s  vm:%s  net:%s  %s", m.sel.Provider, m.sel.Model, m.vmState, m.cfg.Connectivity.Mode, cred))
 
@@ -472,9 +554,9 @@ func (m model) View() tea.View {
 			if i == m.provSel {
 				mark = "> "
 			}
-			status := "no key"
-			if p.Env != "" && strings.TrimSpace(os.Getenv(p.Env)) != "" {
-				status = "key ok"
+			status := "…"
+			if s, ok := m.provKeyStatus[p.Name]; ok {
+				status = s
 			}
 			b.WriteString(mark + p.Label + "  " + status + "\n")
 		}
@@ -493,10 +575,13 @@ func (m model) View() tea.View {
 			if i == m.mcpSel {
 				mark = "> "
 			}
-			status := "no token"
-			env := config.TokenEnv(s)
-			if env != "" && strings.TrimSpace(os.Getenv(env)) != "" {
-				status = "token ok"
+			status := "…"
+			if st, ok := m.mcpKeyStatus[s.Name]; ok {
+				if st == "key ok" {
+					status = "token ok"
+				} else {
+					status = "no token"
+				}
 			}
 			b.WriteString(mark + s.Name + "  " + s.URL + "  " + status + "\n")
 		}
@@ -596,8 +681,13 @@ func max(a, b int) int {
 	return b
 }
 
-func Run(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string, log []string, transcriptPath string) error {
-	p := tea.NewProgram(New(cfg, sel, sb, vmState, log, transcriptPath))
+func Run(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string, log []string, resolver *credsource.Resolver, transcriptPath string) error {
+	if resolver == nil {
+		resolver = credsource.NewResolver()
+	}
+	m := New(cfg, sel, sb, vmState, log, transcriptPath)
+	m.resolver = resolver
+	p := tea.NewProgram(m)
 	_, err := p.Run()
 	return err
 }

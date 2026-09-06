@@ -36,6 +36,8 @@ type Loop struct {
 	OnEvent     func(protocol.AgentEvent)
 	MaxTurns    int
 	Rich        bool
+
+	Stream func(ctx context.Context, model config.Model, messages []provider.Message, tools []provider.ToolSchema) (<-chan provider.Event, error)
 }
 
 func BuiltinTools() []provider.ToolSchema {
@@ -67,13 +69,12 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 	var usage protocol.UsageInfo
 	stopReason := ""
 	for i := 0; i < limit; i++ {
-		var events <-chan provider.Event
-		var err error
-		if l.Rich {
-			events, err = provider.StreamWithUsage(ctx, l.Model, l.Messages, l.allTools())
-		} else {
-			events, err = provider.Stream(ctx, l.Model, l.Messages, l.allTools())
+		if l.Stream == nil {
+			err := fmt.Errorf("no stream function configured for the agent loop")
+			l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
+			return err
 		}
+		events, err := l.Stream(ctx, l.Model, l.Messages, l.allTools())
 		if err != nil {
 			l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
 			_ = l.SaveContext()

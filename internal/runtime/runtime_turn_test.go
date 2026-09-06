@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -57,6 +58,142 @@ func TestUserTurnPlainOnPipe(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "text:ok" {
 		t.Fatalf("%v", got)
+	}
+}
+
+func TestUserTurnDoesNotDropBurstFrames(t *testing.T) {
+	host, guest := net.Pipe()
+	t.Cleanup(func() { host.Close(); guest.Close() })
+	s := &Sandbox{conn: host, GuestProtocol: 2}
+
+	const eventCount = 200
+	written := make(chan error, 1)
+	go func() {
+		turn, err := protocol.ReadFrame(guest)
+		if err != nil {
+			written <- err
+			return
+		}
+		for i := 0; i < eventCount; i++ {
+			raw, _ := protocol.EncodeParams(protocol.AgentEvent{Kind: "text", Text: "x"})
+			if err := protocol.WriteFrame(guest, protocol.Frame{ID: turn.ID, Method: "agent_event", Params: raw}); err != nil {
+				written <- err
+				return
+			}
+		}
+		written <- protocol.WriteFrame(guest, protocol.Frame{ID: turn.ID, Result: []byte(`{"ok":true}`)})
+	}()
+
+	first := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	done := make(chan error, 1)
+	count := 0
+	go func() {
+		done <- s.UserTurn(context.Background(), "hi", func(protocol.AgentEvent) {
+			count++
+			once.Do(func() {
+				close(first)
+				<-release
+			})
+		})
+	}()
+	<-first
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if count != eventCount {
+		t.Fatalf("got %d events, want %d", count, eventCount)
+	}
+}
+
+func TestFrameQueueBudgets(t *testing.T) {
+	q := newFrameQueue(1, 128)
+	if err := q.push(protocol.Frame{ID: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.push(protocol.Frame{ID: "2"}); !errors.Is(err, errQueueFull) {
+		t.Fatalf("count overflow: %v", err)
+	}
+
+	q = newFrameQueue(2, 32)
+	if err := q.push(protocol.Frame{ID: "large", Result: []byte(`{"value":"too large for queue"}`)}); !errors.Is(err, errQueueFull) {
+		t.Fatalf("byte overflow: %v", err)
+	}
+}
+
+func TestUserTurnQueueOverflowFailsClearly(t *testing.T) {
+	host, guest := net.Pipe()
+	t.Cleanup(func() { host.Close(); guest.Close() })
+	s := &Sandbox{conn: host, GuestProtocol: 2}
+
+	guestDone := make(chan error, 1)
+	go func() {
+		turn, err := protocol.ReadFrame(guest)
+		if err != nil {
+			guestDone <- err
+			return
+		}
+		raw, _ := protocol.EncodeParams(protocol.AgentEvent{Kind: "text", Text: "x"})
+		for i := 0; i < turnQueueFrames+16; i++ {
+			if err := protocol.WriteFrame(guest, protocol.Frame{ID: turn.ID, Method: "agent_event", Params: raw}); err != nil {
+				guestDone <- err
+				return
+			}
+		}
+		guestDone <- nil
+	}()
+
+	first := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	done := make(chan error, 1)
+	go func() {
+		done <- s.UserTurn(context.Background(), "hi", func(protocol.AgentEvent) {
+			once.Do(func() {
+				close(first)
+				<-release
+			})
+		})
+	}()
+	<-first
+	select {
+	case <-guestDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("overflow did not close the connection")
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "turn frame queue overflow") {
+			t.Fatalf("got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn did not fail after overflow")
+	}
+}
+
+func TestCallWriteHonorsContextUnderBackpressure(t *testing.T) {
+	host, guest := net.Pipe()
+	t.Cleanup(func() { host.Close(); guest.Close() })
+	s := &Sandbox{conn: host, GuestProtocol: 2}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Call(ctx, "blocked", map[string]bool{"ok": true}, nil)
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("blocked write succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked write ignored context")
 	}
 }
 

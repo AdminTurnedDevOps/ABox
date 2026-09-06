@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
-	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
+	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
 )
 
 type Result struct {
@@ -54,6 +54,32 @@ type tokenResp struct {
 	Error        string `json:"error"`
 }
 
+var savePreferred = credsource.SavePreferred
+
+var (
+	oauthURLValidator = validatePublicOAuthURL
+	lookupOAuthHost   = net.DefaultResolver.LookupIPAddr
+	blockedOAuthNets  = []*net.IPNet{
+		mustCIDR("0.0.0.0/8"),
+		mustCIDR("100.64.0.0/10"),
+		mustCIDR("192.0.0.0/24"),
+		mustCIDR("192.0.2.0/24"),
+		mustCIDR("198.18.0.0/15"),
+		mustCIDR("198.51.100.0/24"),
+		mustCIDR("203.0.113.0/24"),
+		mustCIDR("240.0.0.0/4"),
+		mustCIDR("2001:db8::/32"),
+	}
+)
+
+func mustCIDR(raw string) *net.IPNet {
+	_, network, err := net.ParseCIDR(raw)
+	if err != nil {
+		panic(err)
+	}
+	return network
+}
+
 func LoginNamed(ctx context.Context, cfg config.File, name string) error {
 	srv, err := serverNamed(cfg, name)
 	if err != nil {
@@ -65,8 +91,15 @@ func LoginNamed(ctx context.Context, cfg config.File, name string) error {
 		if val == "" {
 			return fmt.Errorf("set %s or omit credential_env to use OAuth", srv.CredentialEnv)
 		}
-		credentials.SetEnv(env, val)
-		return credentials.Save(env, val)
+		res, err := savePreferred(ctx, env, val)
+		if err != nil {
+			return err
+		}
+		if err := persistCredentialReference(cfg, srv.Name, env, res.Source); err != nil {
+			return err
+		}
+		fmt.Printf("mcp %s token saved (%s)\n", srv.Name, res.Note)
+		return nil
 	}
 	res, err := Login(ctx, srv, Options{})
 	if err != nil {
@@ -75,14 +108,33 @@ func LoginNamed(ctx context.Context, cfg config.File, name string) error {
 	if res.AccessToken == "" {
 		return nil
 	}
-	if err := credentials.Save(env, res.AccessToken); err != nil {
+	saved, err := savePreferred(ctx, env, res.AccessToken)
+	if err != nil {
 		return err
 	}
-	credentials.SetEnv(env, res.AccessToken)
-	if res.RefreshToken != "" {
-		_ = credentials.Save(env+"_REFRESH", res.RefreshToken)
+	if err := persistCredentialReference(cfg, srv.Name, env, saved.Source); err != nil {
+		return err
 	}
+	fmt.Printf("mcp %s token saved (%s)\n", srv.Name, saved.Note)
 	return nil
+}
+
+func persistCredentialReference(cfg config.File, serverName, credentialName, source string) error {
+	if source != "env" && source != "keychain" {
+		return fmt.Errorf("mcp %s token saved to unknown credential source %q", serverName, source)
+	}
+	for i := range cfg.MCPServers {
+		if cfg.MCPServers[i].Name != serverName {
+			continue
+		}
+		cfg.MCPServers[i].CredentialEnv = ""
+		cfg.MCPServers[i].Credential = &config.CredentialRef{Source: source, Name: credentialName}
+		if err := cfg.Save(); err != nil {
+			return fmt.Errorf("save mcp %s credential reference: %w", serverName, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown mcp server %q", serverName)
 }
 
 func serverNamed(cfg config.File, name string) (config.MCPServer, error) {
@@ -99,7 +151,12 @@ func Login(ctx context.Context, srv config.MCPServer, opts Options) (Result, err
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	status, hdr, err := probeMCP(ctx, client, srv.URL)
+	client = withoutRedirects(client)
+	mcpURL, err := oauthURLValidator(ctx, srv.URL)
+	if err != nil {
+		return Result{}, fmt.Errorf("mcp URL: %w", err)
+	}
+	status, hdr, err := probeMCP(ctx, client, mcpURL.String())
 	if err != nil {
 		return Result{}, err
 	}
@@ -111,17 +168,25 @@ func Login(ctx context.Context, srv config.MCPServer, opts Options) (Result, err
 	}
 	metaURL := resourceMetadataURL(hdr)
 	if metaURL == "" {
-		metaURL, err = discoverPRM(ctx, client, srv.URL)
+		metaURL, err = discoverPRM(ctx, client, mcpURL.String())
 		if err != nil {
 			return Result{}, err
 		}
 	}
-	prm, err := fetchPRM(ctx, client, metaURL)
+	metadataURL, err := oauthURLValidator(ctx, metaURL)
+	if err != nil {
+		return Result{}, fmt.Errorf("protected resource metadata URL: %w", err)
+	}
+	if !sameOrigin(mcpURL, metadataURL) {
+		return Result{}, fmt.Errorf("protected resource metadata URL must use the configured MCP origin %s", oauthOrigin(mcpURL))
+	}
+	prm, err := fetchPRM(ctx, client, metadataURL.String())
 	if err != nil {
 		return Result{}, err
 	}
-	if len(prm.AuthorizationServers) == 0 {
-		return Result{}, fmt.Errorf("protected resource metadata has no authorization_servers")
+	resource, err := validateProtectedResourceMetadata(ctx, mcpURL, prm)
+	if err != nil {
+		return Result{}, err
 	}
 	as, err := fetchAS(ctx, client, prm.AuthorizationServers[0])
 	if err != nil {
@@ -158,7 +223,7 @@ func Login(ctx context.Context, srv config.MCPServer, opts Options) (Result, err
 	if scope == "" {
 		scope = strings.Join(prm.ScopesSupported, " ")
 	}
-	authURL := authorizeURL(as.AuthorizationEndpoint, clientID, redir, challenge, state, resourceParam(srv.URL, prm.Resource), scope)
+	authURL := authorizeURL(as.AuthorizationEndpoint, clientID, redir, challenge, state, resource, scope)
 	open := opts.OpenURL
 	if open == nil {
 		open = openBrowser
@@ -179,7 +244,119 @@ func Login(ctx context.Context, srv config.MCPServer, opts Options) (Result, err
 	case <-time.After(5 * time.Minute):
 		return Result{}, fmt.Errorf("oauth timed out waiting for browser callback")
 	}
-	return exchangeCode(ctx, client, as.TokenEndpoint, clientID, redir, code, verifier, resourceParam(srv.URL, prm.Resource))
+	return exchangeCode(ctx, client, as.TokenEndpoint, clientID, redir, code, verifier, resource)
+}
+
+func withoutRedirects(client *http.Client) *http.Client {
+	clone := *client
+	clone.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &clone
+}
+
+func validatePublicOAuthURL(ctx context.Context, raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Opaque != "" || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return nil, fmt.Errorf("must be an https URL without userinfo or fragment")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" || strings.HasSuffix(host, ".") {
+		return nil, fmt.Errorf("has an invalid host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !publicOAuthIP(ip) {
+			return nil, fmt.Errorf("host %q is not a public address", host)
+		}
+		return u, nil
+	}
+	if !strings.Contains(host, ".") || host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") || strings.HasSuffix(host, ".home.arpa") {
+		return nil, fmt.Errorf("host %q is not a public DNS name", host)
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	addrs, err := lookupOAuthHost(lookupCtx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve host %q: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("host %q has no addresses", host)
+	}
+	for _, addr := range addrs {
+		if !publicOAuthIP(addr.IP) {
+			return nil, fmt.Errorf("host %q resolves to non-public address %s", host, addr.IP)
+		}
+	}
+	return u, nil
+}
+
+func publicOAuthIP(ip net.IP) bool {
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	for _, network := range blockedOAuthNets {
+		if network.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+func oauthOrigin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	defaultPort := "443"
+	if scheme == "http" {
+		defaultPort = "80"
+	}
+	if port != "" && port != defaultPort {
+		return scheme + "://" + net.JoinHostPort(host, port)
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Hostname(), b.Hostname()) && effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
+
+func validateProtectedResourceMetadata(ctx context.Context, mcpURL *url.URL, prm prmDoc) (string, error) {
+	if strings.TrimSpace(prm.Resource) == "" {
+		return "", fmt.Errorf("protected resource metadata has no resource identifier")
+	}
+	resourceURL, err := oauthURLValidator(ctx, prm.Resource)
+	if err != nil {
+		return "", fmt.Errorf("protected resource metadata resource: %w", err)
+	}
+	if !sameOrigin(mcpURL, resourceURL) {
+		return "", fmt.Errorf("protected resource metadata resource must use the configured MCP origin %s", oauthOrigin(mcpURL))
+	}
+	if len(prm.AuthorizationServers) == 0 {
+		return "", fmt.Errorf("protected resource metadata has no authorization_servers")
+	}
+	for _, raw := range prm.AuthorizationServers {
+		issuer, err := oauthURLValidator(ctx, raw)
+		if err != nil {
+			return "", fmt.Errorf("authorization server %q: %w", raw, err)
+		}
+		if issuer.RawQuery != "" {
+			return "", fmt.Errorf("authorization server issuer must not contain a query")
+		}
+	}
+	return strings.TrimRight(resourceURL.String(), "/"), nil
 }
 
 func probeMCP(ctx context.Context, client *http.Client, rawURL string) (int, http.Header, error) {
@@ -262,9 +439,12 @@ func fetchPRM(ctx context.Context, client *http.Client, raw string) (prmDoc, err
 
 func fetchAS(ctx context.Context, client *http.Client, issuer string) (asDoc, error) {
 	issuer = strings.TrimRight(issuer, "/")
-	u, err := url.Parse(issuer)
+	u, err := oauthURLValidator(ctx, issuer)
 	if err != nil {
-		return asDoc{}, err
+		return asDoc{}, fmt.Errorf("authorization server issuer: %w", err)
+	}
+	if u.RawQuery != "" {
+		return asDoc{}, fmt.Errorf("authorization server issuer must not contain a query")
 	}
 	var candidates []string
 	if u.Path != "" && u.Path != "/" {
@@ -287,15 +467,47 @@ func fetchAS(ctx context.Context, client *http.Client, issuer string) (asDoc, er
 			last = err
 			continue
 		}
-		if doc.AuthorizationEndpoint != "" && doc.TokenEndpoint != "" {
+		if err := validateAuthorizationServerMetadata(ctx, u, doc); err == nil {
 			return doc, nil
+		} else {
+			last = fmt.Errorf("%s: %w", c, err)
+			continue
 		}
-		last = fmt.Errorf("%s: missing endpoints", c)
 	}
 	if last == nil {
 		last = fmt.Errorf("authorization server metadata not found")
 	}
 	return asDoc{}, last
+}
+
+func validateAuthorizationServerMetadata(ctx context.Context, issuer *url.URL, doc asDoc) error {
+	if strings.TrimRight(doc.Issuer, "/") != strings.TrimRight(issuer.String(), "/") {
+		return fmt.Errorf("authorization server metadata issuer %q does not match %q", doc.Issuer, issuer.String())
+	}
+	for _, endpoint := range []struct {
+		name     string
+		raw      string
+		required bool
+	}{
+		{name: "authorization_endpoint", raw: doc.AuthorizationEndpoint, required: true},
+		{name: "token_endpoint", raw: doc.TokenEndpoint, required: true},
+		{name: "registration_endpoint", raw: doc.RegistrationEndpoint},
+	} {
+		if endpoint.raw == "" {
+			if endpoint.required {
+				return fmt.Errorf("authorization server metadata has no %s", endpoint.name)
+			}
+			continue
+		}
+		u, err := oauthURLValidator(ctx, endpoint.raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", endpoint.name, err)
+		}
+		if !sameOrigin(issuer, u) {
+			return fmt.Errorf("%s must use authorization server origin %s", endpoint.name, oauthOrigin(issuer))
+		}
+	}
+	return nil
 }
 
 func supportsS256(methods []string) bool {
@@ -402,12 +614,15 @@ func exchangeCode(ctx context.Context, client *http.Client, tokenURL, clientID, 
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 300 {
+		return Result{}, fmt.Errorf("token endpoint: %s", resp.Status)
+	}
 	var tr tokenResp
 	if err := json.Unmarshal(b, &tr); err != nil {
 		return Result{}, fmt.Errorf("token json: %w", err)
 	}
-	if resp.StatusCode >= 300 || tr.AccessToken == "" {
-		return Result{}, fmt.Errorf("token %s: %s", resp.Status, b)
+	if tr.AccessToken == "" {
+		return Result{}, fmt.Errorf("token endpoint response has no access token")
 	}
 	return Result{AccessToken: tr.AccessToken, RefreshToken: tr.RefreshToken, TokenType: tr.TokenType}, nil
 }
@@ -446,19 +661,6 @@ func randomHex(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
-}
-
-func resourceParam(mcpURL, prmResource string) string {
-	if prmResource != "" {
-		return strings.TrimRight(prmResource, "/")
-	}
-	u, err := url.Parse(mcpURL)
-	if err != nil {
-		return mcpURL
-	}
-	u.RawQuery = ""
-	u.Fragment = ""
-	return strings.TrimRight(u.String(), "/")
 }
 
 func openBrowser(raw string) error {

@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +26,15 @@ import (
 var ErrGuestTooOld = errors.New("guest protocol too old")
 
 const cancelResponseTimeout = 5 * time.Second
+
+const (
+	callQueueFrames = 1
+	callQueueBytes  = protocol.MaxFrameBytes
+	turnQueueFrames = 256
+	turnQueueBytes  = 8 << 20
+	writeTimeout    = 30 * time.Second
+	shutdownTimeout = 3 * time.Second
+)
 
 type TurnOptions struct {
 	MaxTurns   int
@@ -41,18 +52,163 @@ type TurnOutcome struct {
 	StopReason string
 }
 
+// Handle must not block the connection read loop; stream via notify instead.
+type GuestCallHandler interface {
+	Handle(ctx context.Context, method string, params json.RawMessage,
+		notify func(method string, params any) error) (any, *protocol.Error)
+}
+
 type Sandbox struct {
 	Sess          *session.Session
 	History       []protocol.HistoryLine
 	GuestProtocol int
 	cmd           *exec.Cmd
 	conn          net.Conn
-	mu            sync.Mutex
-	writeMu       sync.Mutex
-	nextID        int
+	OnGuestCall   GuestCallHandler
+
+	writeOnce sync.Once
+	writeGate chan struct{}
+	turnMu    sync.Mutex
+
+	mu         sync.Mutex
+	nextID     int
+	calls      map[string]*frameQueue
+	activeTurn string
+	turnQ      *frameQueue
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+	guestSlots chan struct{}
+	cancelSlot chan struct{}
+	busyQueue  chan protocol.Frame
+
+	readOnce sync.Once
+	failOnce sync.Once
+	readDone chan struct{}
 }
 
-func Prepare(sess *session.Session, imagePath string, model config.Model, secrets map[string]string, mcpServers []config.MCPServer, resume bool) error {
+var (
+	errQueueClosed = errors.New("frame queue closed")
+	errQueueFull   = errors.New("frame queue budget exceeded")
+)
+
+// frameQueue gives the connection read loop bounded, nonblocking delivery.
+// Exceeding either budget fails the owning call/turn instead of silently
+// dropping a response or blocking cancellation traffic.
+type frameQueue struct {
+	mu     sync.Mutex
+	frames []queuedFrame
+	bytes  int
+	maxN   int
+	maxB   int
+	wake   chan struct{}
+	closed bool
+	err    error
+}
+
+type queuedFrame struct {
+	frame protocol.Frame
+	size  int
+}
+
+func newFrameQueue(maxFrames, maxBytes int) *frameQueue {
+	return &frameQueue{maxN: maxFrames, maxB: maxBytes, wake: make(chan struct{}, 1)}
+}
+
+func (q *frameQueue) push(frame protocol.Frame) error {
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return err
+	}
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
+		return errQueueClosed
+	}
+	if len(q.frames) >= q.maxN || q.bytes+len(raw) > q.maxB {
+		q.mu.Unlock()
+		return errQueueFull
+	}
+	q.frames = append(q.frames, queuedFrame{frame: frame, size: len(raw)})
+	q.bytes += len(raw)
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (q *frameQueue) abort(err error) {
+	q.mu.Lock()
+	if !q.closed {
+		q.frames = nil
+		q.bytes = 0
+		q.closed = true
+		q.err = err
+	}
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (q *frameQueue) close(err error) {
+	q.mu.Lock()
+	if !q.closed {
+		q.closed = true
+		q.err = err
+	}
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (q *frameQueue) pop(ctx context.Context) (protocol.Frame, bool, error) {
+	for {
+		q.mu.Lock()
+		if len(q.frames) > 0 {
+			item := q.frames[0]
+			q.frames[0] = queuedFrame{}
+			q.frames = q.frames[1:]
+			q.bytes -= item.size
+			q.mu.Unlock()
+			return item.frame, true, nil
+		}
+		if q.closed {
+			err := q.err
+			q.mu.Unlock()
+			return protocol.Frame{}, false, err
+		}
+		q.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			// Prefer a frame that became ready with the cancellation signal.
+			// This avoids racing a real terminal response at the deadline.
+			q.mu.Lock()
+			if len(q.frames) > 0 {
+				item := q.frames[0]
+				q.frames[0] = queuedFrame{}
+				q.frames = q.frames[1:]
+				q.bytes -= item.size
+				q.mu.Unlock()
+				return item.frame, true, nil
+			}
+			if q.closed {
+				err := q.err
+				q.mu.Unlock()
+				return protocol.Frame{}, false, err
+			}
+			q.mu.Unlock()
+			return protocol.Frame{}, false, ctx.Err()
+		case <-q.wake:
+		}
+	}
+}
+
+func Prepare(sess *session.Session, imagePath string, model config.Model, mcpServers []config.MCPServer, resume bool) error {
 	if imagePath == "" {
 		imagePath = config.GuestImagePath()
 	}
@@ -68,31 +224,14 @@ func Prepare(sess *session.Session, imagePath string, model config.Model, secret
 			return fmt.Errorf("clone session disk: %w", err)
 		}
 	}
-	if err := sess.WriteGuestConfig(model, secrets, mcpServers); err != nil {
+	if err := sess.WriteGuestConfig(model, mcpServers); err != nil {
 		return err
 	}
-	return writeConfigDisk(sess)
-}
-
-func writeConfigDisk(sess *session.Session) error {
 	data, err := os.ReadFile(sess.GuestConfigJSON())
 	if err != nil {
 		return err
 	}
-	// Resume rewrites config.raw; the previous run left it mode 0400.
-	_ = os.Chmod(sess.ConfigDisk(), 0o600)
-	f, err := os.OpenFile(sess.ConfigDisk(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(data); err != nil {
-		return err
-	}
-	if _, err := f.Write(make([]byte, 1<<20-len(data))); err != nil {
-		return err
-	}
-	return os.Chmod(sess.ConfigDisk(), 0o400)
+	return session.WritePaddedConfig(sess.ConfigDisk(), data)
 }
 
 func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int, ram int) (*Sandbox, error) {
@@ -179,7 +318,7 @@ func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int,
 		conn = a.c
 	}
 
-	sb := &Sandbox{Sess: sess, cmd: cmd, conn: conn}
+	sb := &Sandbox{Sess: sess, cmd: cmd, conn: conn, calls: map[string]*frameQueue{}}
 	if err := sb.waitHello(ctx); err != nil {
 		sb.Stop()
 		return nil, err
@@ -203,7 +342,7 @@ func (s *Sandbox) waitHello(ctx context.Context) error {
 	if hello.SessionID != s.Sess.ID || hello.Capability != s.Sess.Capability {
 		return fmt.Errorf("guest capability mismatch")
 	}
-	ok, _ := protocol.EncodeParams(protocol.HelloResult{Accepted: true})
+	ok, _ := protocol.EncodeParams(protocol.HelloResult{Accepted: true, Protocol: protocol.Version})
 	if err := protocol.WriteFrame(s.conn, protocol.Frame{ID: frame.ID, Result: ok}); err != nil {
 		return err
 	}
@@ -217,37 +356,269 @@ func (s *Sandbox) waitHello(ctx context.Context) error {
 	return nil
 }
 
+func (s *Sandbox) startReading() {
+	s.readOnce.Do(func() {
+		s.readDone = make(chan struct{})
+		s.lifeCtx, s.lifeCancel = context.WithCancel(context.Background())
+		s.guestSlots = make(chan struct{}, protocol.MaxGuestCalls-1) // reserve one slot for cancel
+		s.cancelSlot = make(chan struct{}, 1)
+		s.busyQueue = make(chan protocol.Frame, protocol.MaxGuestCalls)
+		go s.writeBusyReplies()
+		go s.readLoop()
+	})
+}
+
+func (s *Sandbox) readLoop() {
+	for {
+		frame, err := protocol.ReadFrame(s.conn)
+		if err != nil {
+			s.failAll(err)
+			return
+		}
+		if frame.Method != "" {
+			switch {
+			case strings.HasPrefix(frame.ID, "g-"):
+				slots := s.guestSlots
+				if frame.Method == "provider_cancel" {
+					slots = s.cancelSlot
+				}
+				select {
+				case slots <- struct{}{}:
+					go func(frame protocol.Frame, slots chan struct{}) {
+						defer func() { <-slots }()
+						s.dispatchGuestCall(frame)
+					}(frame, slots)
+				default:
+					select {
+					case s.busyQueue <- frame:
+					default:
+						s.failConnection(fmt.Errorf("guest busy reply backpressure exceeded"))
+						return
+					}
+				}
+			case frame.Method == "agent_event":
+				s.mu.Lock()
+				q := s.turnQ
+				active := s.activeTurn
+				if q != nil && frame.ID == active {
+					if err := q.push(frame); err != nil && !errors.Is(err, errQueueClosed) {
+						queueErr := fmt.Errorf("turn frame queue overflow: %w", err)
+						q.abort(queueErr)
+						s.mu.Unlock()
+						s.failConnection(queueErr)
+						return
+					}
+				}
+				s.mu.Unlock()
+			default:
+			}
+			continue
+		}
+		s.mu.Lock()
+		q, known := s.calls[frame.ID]
+		turnFrame := false
+		if !known && frame.ID == s.activeTurn {
+			q = s.turnQ
+			turnFrame = true
+		}
+		if q == nil {
+			s.mu.Unlock()
+			continue
+		}
+		if err := q.push(frame); err != nil && !errors.Is(err, errQueueClosed) {
+			queueName := "call"
+			if turnFrame {
+				queueName = "turn"
+			}
+			queueErr := fmt.Errorf("%s frame queue overflow: %w", queueName, err)
+			q.abort(queueErr)
+			s.mu.Unlock()
+			s.failConnection(queueErr)
+			return
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *Sandbox) failConnection(err error) {
+	_ = s.conn.Close()
+	s.failAll(err)
+}
+
+func (s *Sandbox) failAll(err error) {
+	s.failOnce.Do(func() {
+		if err == nil {
+			err = errors.New("guest connection closed")
+		}
+		if s.lifeCancel != nil {
+			s.lifeCancel()
+		}
+		s.mu.Lock()
+		pending := s.calls
+		s.calls = map[string]*frameQueue{}
+		turnQ := s.turnQ
+		s.turnQ = nil
+		s.activeTurn = ""
+		s.mu.Unlock()
+		for _, q := range pending {
+			q.close(err)
+		}
+		if turnQ != nil {
+			turnQ.close(err)
+		}
+		close(s.readDone)
+	})
+}
+
+func (s *Sandbox) dispatchGuestCall(frame protocol.Frame) {
+	out := protocol.Frame{V: protocol.Version, ID: frame.ID}
+	if s.GuestProtocol < 3 {
+		out.Error = &protocol.Error{Code: "host", Message: fmt.Sprintf("provider broker requires protocol 3, guest speaks %d", s.GuestProtocol)}
+		if err := s.writeFrame(out); err != nil {
+			s.failConnection(err)
+		}
+		return
+	}
+	if s.OnGuestCall == nil {
+		out.Error = &protocol.Error{Code: "host", Message: "guest calls not supported by this host"}
+		if err := s.writeFrame(out); err != nil {
+			s.failConnection(err)
+		}
+		return
+	}
+	notify := func(method string, params any) error {
+		raw, err := protocol.EncodeParams(params)
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.nextID++
+		n := s.nextID
+		s.mu.Unlock()
+		if err := s.writeFrame(protocol.Frame{V: protocol.Version, ID: fmt.Sprintf("h-%d", n), Method: method, Params: raw}); err != nil {
+			s.failConnection(err)
+			return err
+		}
+		return nil
+	}
+	res, perr := s.OnGuestCall.Handle(s.lifeCtx, frame.Method, frame.Params, notify)
+	switch {
+	case perr != nil:
+		out.Error = perr
+	case res != nil:
+		raw, err := protocol.EncodeParams(res)
+		if err != nil {
+			out.Error = &protocol.Error{Code: "host", Message: err.Error()}
+		} else {
+			out.Result = raw
+		}
+	default:
+		out.Result = []byte(`{"ok":true}`)
+	}
+	if err := s.writeFrame(out); err != nil {
+		s.failConnection(err)
+	}
+}
+
+func (s *Sandbox) writeBusyReplies() {
+	for {
+		select {
+		case <-s.lifeCtx.Done():
+			return
+		case frame := <-s.busyQueue:
+			if err := s.writeFrame(protocol.Frame{V: protocol.Version, ID: frame.ID, Error: &protocol.Error{
+				Code: "busy", Message: "too many concurrent guest calls",
+			}}); err != nil {
+				s.failConnection(err)
+				return
+			}
+		}
+	}
+}
+
 func (s *Sandbox) writeFrame(f protocol.Frame) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return protocol.WriteFrame(s.conn, f)
+	return s.writeFrameContext(context.Background(), f)
+}
+
+func (s *Sandbox) writeFrameContext(parent context.Context, f protocol.Frame) error {
+	ctx, cancel := context.WithTimeout(parent, writeTimeout)
+	defer cancel()
+	s.writeOnce.Do(func() {
+		s.writeGate = make(chan struct{}, 1)
+		s.writeGate <- struct{}{}
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.writeGate:
+	}
+	defer func() { s.writeGate <- struct{}{} }()
+	done := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			select {
+			case <-done:
+			default:
+				_ = s.conn.Close()
+			}
+		}
+		close(watchDone)
+	}()
+	err := protocol.WriteFrame(s.conn, f)
+	close(done)
+	<-watchDone
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Sandbox) dropCall(id string) {
+	s.mu.Lock()
+	q := s.calls[id]
+	delete(s.calls, id)
+	s.mu.Unlock()
+	if q != nil {
+		q.close(context.Canceled)
+	}
 }
 
 func (s *Sandbox) Call(ctx context.Context, method string, params any, result any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.nextID++
-	id := fmt.Sprintf("%d", s.nextID)
+	s.startReading()
 	raw, err := protocol.EncodeParams(params)
 	if err != nil {
 		return err
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = s.conn.SetDeadline(deadline)
-		defer s.conn.SetDeadline(time.Time{})
+	s.mu.Lock()
+	if s.lifeCtx.Err() != nil {
+		s.mu.Unlock()
+		return errors.New("guest connection closed")
 	}
-	if err := s.writeFrame(protocol.Frame{ID: id, Method: method, Params: raw}); err != nil {
+	if s.calls == nil {
+		s.calls = map[string]*frameQueue{}
+	}
+	s.nextID++
+	id := strconv.Itoa(s.nextID)
+	q := newFrameQueue(callQueueFrames, callQueueBytes)
+	s.calls[id] = q
+	s.mu.Unlock()
+	if err := s.writeFrameContext(ctx, protocol.Frame{V: protocol.Version, ID: id, Method: method, Params: raw}); err != nil {
+		s.failConnection(err)
 		return err
 	}
-	var frame protocol.Frame
-	for {
-		frame, err = protocol.ReadFrame(s.conn)
+	frame, ok, err := q.pop(ctx)
+	s.dropCall(id)
+	if !ok {
 		if err != nil {
 			return err
 		}
-		if frame.ID == id {
-			break
-		}
+		return errors.New("guest connection closed")
 	}
 	if frame.Error != nil {
 		return frame.Error
@@ -268,13 +639,20 @@ func (s *Sandbox) UserTurnCtx(ctx context.Context, text string, opts TurnOptions
 }
 
 func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOptions, onEvent func(protocol.AgentEvent), v2API bool) (*TurnOutcome, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if v2API && opts.needsV2() && s.GuestProtocol < 2 {
 		return nil, fmt.Errorf("%w: need protocol 2, guest speaks %d", ErrGuestTooOld, s.GuestProtocol)
 	}
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+	s.startReading()
+
+	s.mu.Lock()
+	if s.lifeCtx.Err() != nil {
+		s.mu.Unlock()
+		return nil, errors.New("guest connection closed")
+	}
 	s.nextID++
-	id := fmt.Sprintf("%d", s.nextID)
+	id := strconv.Itoa(s.nextID)
 	params := protocol.UserTurnParams{Text: text}
 	if s.GuestProtocol >= 2 {
 		params.MaxTurns = opts.MaxTurns
@@ -283,44 +661,51 @@ func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOpti
 	}
 	raw, err := protocol.EncodeParams(params)
 	if err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
-	supportsCancel := v2API && s.GuestProtocol >= 2
-	if supportsCancel {
-		defer s.conn.SetDeadline(time.Time{})
-	} else if deadline, ok := ctx.Deadline(); ok {
-		_ = s.conn.SetDeadline(deadline)
-		defer s.conn.SetDeadline(time.Time{})
-	}
-	if err := s.writeFrame(protocol.Frame{ID: id, Method: "user_turn", Params: raw}); err != nil {
+	turnQ := newFrameQueue(turnQueueFrames, turnQueueBytes)
+	s.activeTurn = id
+	s.turnQ = turnQ
+	s.mu.Unlock()
+	if err := s.writeFrame(protocol.Frame{V: protocol.Version, ID: id, Method: "user_turn", Params: raw}); err != nil {
+		s.failConnection(err)
 		return nil, err
 	}
+	defer func() {
+		s.mu.Lock()
+		if s.activeTurn == id {
+			s.activeTurn = ""
+			s.turnQ = nil
+		}
+		s.mu.Unlock()
+		turnQ.close(context.Canceled)
+	}()
 
-	var cancelOnce sync.Once
+	supportsCancel := v2API && s.GuestProtocol >= 2
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
+	waitCtx := ctx
 	if supportsCancel {
-		go func() {
-			select {
-			case <-ctx.Done():
-				cancelOnce.Do(func() {
-					raw, err := protocol.EncodeParams(protocol.CancelTurnParams{ID: id})
-					if err != nil {
-						return
-					}
-					_ = s.writeFrame(protocol.Frame{ID: id + "-cancel", Method: "cancel_turn", Params: raw})
-					_ = s.conn.SetReadDeadline(time.Now().Add(cancelResponseTimeout))
-				})
-			case <-stopWatch:
-			}
-		}()
+		var stopWait context.CancelCauseFunc
+		waitCtx, stopWait = context.WithCancelCause(context.Background())
+		defer stopWait(context.Canceled)
+		go s.watchCancel(ctx, id, stopWatch, stopWait)
 	}
 
 	out := &TurnOutcome{}
 	for {
-		frame, err := protocol.ReadFrame(s.conn)
-		if err != nil {
-			return out, err
+		frame, ok, err := turnQ.pop(waitCtx)
+		if !ok {
+			if err != nil {
+				if supportsCancel {
+					if cause := context.Cause(waitCtx); cause != nil {
+						return out, cause
+					}
+				}
+				return out, err
+			}
+			return out, errors.New("guest connection closed")
 		}
 		if frame.Method == "agent_event" && frame.ID == id {
 			ev, err := protocol.DecodeParams[protocol.AgentEvent](frame.Params)
@@ -336,17 +721,76 @@ func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOpti
 			}
 			continue
 		}
-		if frame.ID == id {
-			if frame.Error != nil {
-				if frame.Error.Code == "canceled" {
-					out.Canceled = true
-					return out, frame.Error
-				}
-				return out, frame.Error
+		if frame.Error != nil {
+			if frame.Error.Code == "canceled" {
+				out.Canceled = true
 			}
-			return out, nil
+			return out, frame.Error
+		}
+		return out, nil
+	}
+}
+
+// watchCancel forwards cancellation to a protocol-2+ guest and fails the turn
+// if the guest never acknowledges within cancelResponseTimeout.
+func (s *Sandbox) watchCancel(ctx context.Context, turnID string, stopWatch <-chan struct{}, stopWait context.CancelCauseFunc) {
+	select {
+	case <-ctx.Done():
+	case <-stopWatch:
+		return
+	}
+	raw, err := protocol.EncodeParams(protocol.CancelTurnParams{ID: turnID})
+	if err != nil {
+		return
+	}
+	cancelCtx, cancel := context.WithTimeout(context.Background(), cancelResponseTimeout)
+	defer cancel()
+	err = s.writeFrameContext(cancelCtx, protocol.Frame{V: protocol.Version, ID: turnID + "-cancel", Method: "cancel_turn", Params: raw})
+	if err != nil {
+		s.failConnection(err)
+		stopWait(err)
+		return
+	}
+	select {
+	case <-stopWatch:
+	case <-cancelCtx.Done():
+		stopWait(&protocol.Error{
+			Code:    "timeout",
+			Message: "guest did not acknowledge cancel within " + cancelResponseTimeout.String(),
+		})
+	}
+}
+
+func (s *Sandbox) PushSecrets(ctx context.Context, model config.Model, secrets map[string]string) error {
+	if len(secrets) == 0 {
+		return nil
+	}
+	if s.GuestProtocol < 2 {
+		return fmt.Errorf("guest image predates secret push; run make image")
+	}
+	if s.GuestProtocol == 2 {
+		fmt.Fprintf(os.Stderr, "abox: guest speaks protocol 2; pushing legacy secrets (run make image to upgrade)\n")
+	}
+	modelKey := model.EnvName()
+	rest := map[string]string{}
+	for k, v := range secrets {
+		if k != modelKey {
+			rest[k] = v
 		}
 	}
+	var modelSecrets map[string]string
+	if s.GuestProtocol < 3 {
+		if v, ok := secrets[modelKey]; ok {
+			modelSecrets = map[string]string{modelKey: v}
+		}
+	}
+	if err := s.SetModel(ctx, model, modelSecrets); err != nil {
+		return err
+	}
+	if len(rest) > 0 {
+		return s.SetMCPTokens(ctx, rest)
+	}
+	return nil
 }
 
 func (s *Sandbox) SetMCPTokens(ctx context.Context, secrets map[string]string) error {
@@ -354,6 +798,9 @@ func (s *Sandbox) SetMCPTokens(ctx context.Context, secrets map[string]string) e
 }
 
 func (s *Sandbox) SetModel(ctx context.Context, model config.Model, secrets map[string]string) error {
+	if s.GuestProtocol >= 3 {
+		secrets = nil
+	}
 	return s.Call(ctx, "set_model", protocol.SetModelParams{
 		Model:   model.ToGuest(),
 		Secrets: secrets,
@@ -382,8 +829,13 @@ func (s *Sandbox) TransferArchive(ctx context.Context, archive []byte) error {
 
 func (s *Sandbox) Stop() error {
 	if s.conn != nil {
-		_ = s.Call(context.Background(), "shutdown", map[string]bool{"ok": true}, nil)
-		s.conn.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		_ = s.Call(ctx, "shutdown", map[string]bool{"ok": true}, nil)
+		cancel()
+		if s.lifeCancel != nil {
+			s.lifeCancel()
+		}
+		_ = s.conn.Close()
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Signal(os.Interrupt)

@@ -5,8 +5,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,6 +18,8 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/agent"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
+	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
+	"github.com/AdminTurnedDevOps/ABox/internal/llmbroker"
 	"github.com/AdminTurnedDevOps/ABox/internal/mcpauth"
 	"github.com/AdminTurnedDevOps/ABox/internal/repository"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
@@ -34,6 +38,9 @@ func main() {
 func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		return runMCP(os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "creds" {
+		return runCreds(os.Args[2:])
 	}
 	fs := flag.NewFlagSet("abox", flag.ContinueOnError)
 	execFlag := fs.Bool("exec", false, "headless driver")
@@ -58,9 +65,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := credentials.ApplyToEnv(); err != nil {
+	if err := scrubLegacySessions(); err != nil {
 		return err
 	}
+	resolver := credsource.NewResolver()
+	defer resolver.Close()
+
 	sel, ok := cfg.ModelNamed(*modelName)
 	if !ok {
 		return fmt.Errorf("no model profile %q (config %s)", *modelName, cfgPath)
@@ -121,7 +131,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := runtime.Prepare(sess, image, sel, cfg.SecretsFromEnv(), mcpServers, *resume); err != nil {
+	if err := runtime.Prepare(sess, image, sel, mcpServers, *resume); err != nil {
 		if execMode {
 			return err
 		}
@@ -139,9 +149,26 @@ func run() error {
 			fmt.Fprintf(os.Stderr, "abox: vm start: %v\n", err)
 			vmState = "failed"
 		} else {
+			if started.GuestProtocol < 2 {
+				if *resume {
+					started.Stop()
+					return fmt.Errorf("cannot resume protocol-1 session %s after secretless config rewrite; rebuild the guest image and start a new session", sess.ID)
+				}
+				if !*probeVM {
+					started.Stop()
+					return fmt.Errorf("protocol-1 guest cannot use the secretless config; rebuild the guest image")
+				}
+			}
 			sb = started
 			vmState = "ready"
 			defer sb.Stop()
+			sb.OnGuestCall = brokerForMode(cfg, resolver, execMode)
+			if err := pushSecrets(sb, cfg, resolver, sel); err != nil {
+				if execMode {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "abox: %v\n", err)
+			}
 			if !*resume {
 				archive, err := repository.ArchiveHEAD(snap.Root)
 				if err != nil {
@@ -171,14 +198,49 @@ func run() error {
 	if execMode {
 		return runExec(sb, *prompt)
 	}
-	var log []string
+	var transcript []string
 	if *resume {
-		log = resumeLog(sess, sb)
-		if len(log) > 0 {
-			_ = session.WriteTranscript(sess.TranscriptPath(), log)
+		transcript = resumeLog(sess, sb)
+		if len(transcript) > 0 {
+			_ = session.WriteTranscript(sess.TranscriptPath(), transcript)
 		}
 	}
-	return tui.Run(cfg, sel, sb, vmState, log, sess.TranscriptPath())
+	return tui.Run(cfg, sel, sb, vmState, transcript, resolver, sess.TranscriptPath())
+}
+
+// Headless logs stream lifecycle; the TUI stays quiet so logs never paint into the UI.
+func brokerForMode(cfg config.File, resolver *credsource.Resolver, execMode bool) *llmbroker.Broker {
+	b := llmbroker.New(cfg, resolver)
+	if execMode {
+		b.SetLogger(log.Printf)
+	}
+	return b
+}
+
+func pushSecrets(sb *runtime.Sandbox, cfg config.File, resolver *credsource.Resolver, sel config.Model) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	secrets, resolveErr := credsource.ResolveSelected(ctx, resolver, cfg, sel)
+	pushErr := sb.PushSecrets(ctx, sel, secrets)
+	var errs []error
+	if resolveErr != nil {
+		errs = append(errs, fmt.Errorf("resolve credentials: %w", resolveErr))
+	}
+	if pushErr != nil {
+		errs = append(errs, fmt.Errorf("push resolved credentials: %w", pushErr))
+	}
+	return errors.Join(errs...)
+}
+
+func scrubLegacySessions() error {
+	n, err := session.ScrubSecretsEverywhere()
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "abox: scrubbed plaintext secrets from %d old session(s)\n", n)
+	}
+	if err != nil {
+		return fmt.Errorf("legacy session scrub incomplete; affected sessions may still contain plaintext secrets: %w", err)
+	}
+	return nil
 }
 
 func resumeLog(sess *session.Session, sb *runtime.Sandbox) []string {

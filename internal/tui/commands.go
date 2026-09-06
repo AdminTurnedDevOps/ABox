@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"context"
+	"fmt"
 	"strings"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
-	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
+	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
 )
 
 type slashCmd struct {
@@ -44,22 +46,64 @@ func mcpServers(cfg config.File) []config.MCPServer {
 	return servers
 }
 
-func applyMCPKey(server config.MCPServer, key string) (string, error) {
-	env := config.TokenEnv(server)
-	if err := credentials.Save(env, key); err != nil {
-		return "", err
-	}
-	credentials.SetEnv(env, key)
-	return env, nil
+var saveCredential = func(envName, value string) (credsource.SaveResult, error) {
+	return credsource.SavePreferred(context.Background(), envName, value)
 }
 
-func applyProviderKey(cfg config.File, choice config.ProviderProfile, key string) (config.Model, error) {
-	if err := credentials.Save(choice.Env, key); err != nil {
-		return config.Model{}, err
+func applyMCPKey(cfg config.File, server config.MCPServer, key string) (config.File, string, string, error) {
+	env := config.TokenEnv(server)
+	res, err := saveCredential(env, key)
+	if err != nil {
+		return cfg, "", "", err
 	}
-	credentials.SetEnv(choice.Env, key)
-	if m, ok := cfg.ModelNamed(choice.Name); ok {
-		return m, nil
+	found := false
+	for i, s := range cfg.MCPServers {
+		if s.Name == server.Name {
+			found = true
+			cfg.MCPServers[i].CredentialEnv = ""
+			cfg.MCPServers[i].Credential = &config.CredentialRef{Source: res.Source, Name: env}
+			if err := cfg.Save(); err != nil {
+				return cfg, env, res.Note, fmt.Errorf("config update: %w", err)
+			}
+			break
+		}
 	}
-	return choice.ModelConfig(), nil
+	if !found {
+		return cfg, env, res.Note, fmt.Errorf("config update did not retain MCP server %q", server.Name)
+	}
+	return cfg, env, res.Note, nil
+}
+
+func applyProviderKey(cfg config.File, choice config.ProviderProfile, key string) (config.File, config.Model, string, error) {
+	res, err := saveCredential(choice.Env, key)
+	if err != nil {
+		return cfg, config.Model{}, "", err
+	}
+	found := false
+	changed := false
+	for i, m := range cfg.Models {
+		if m.Name == choice.Name {
+			found = true
+			cfg.Models[i].CredentialEnv = ""
+			cfg.Models[i].Credential = &config.CredentialRef{Source: res.Source, Name: choice.Env}
+			changed = true
+		}
+	}
+	if !found {
+		model := choice.ModelConfig()
+		model.CredentialEnv = ""
+		model.Credential = &config.CredentialRef{Source: res.Source, Name: choice.Env}
+		cfg.Models = append(cfg.Models, model)
+		changed = true
+	}
+	if changed {
+		if err := cfg.Save(); err != nil {
+			return cfg, config.Model{}, res.Note, fmt.Errorf("config update: %w", err)
+		}
+	}
+	sel, ok := cfg.ModelNamed(choice.Name)
+	if !ok {
+		return cfg, config.Model{}, res.Note, fmt.Errorf("config update did not retain model profile %q", choice.Name)
+	}
+	return cfg, sel, res.Note, nil
 }

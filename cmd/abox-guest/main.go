@@ -20,6 +20,7 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/agent"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
+	"github.com/AdminTurnedDevOps/ABox/internal/guest/brokerclient"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/egress"
 	guestmcp "github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
@@ -43,7 +44,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	applySecrets(cfg.Secrets)
 	repo := tools.Repo{Root: cfg.RepoDir}
 	if err := os.MkdirAll(repo.Root, 0o755); err != nil {
 		return err
@@ -58,7 +58,14 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "abox-guest: mcp: %v\n", err)
 	}
 	defer mcpMgr.Close()
-	loop := &agent.Loop{Model: config.ModelFromGuest(cfg.Model), Repo: repo, MCP: mcpMgr, ContextFile: agent.DefaultContextFile}
+	bclient := brokerclient.New()
+	loop := &agent.Loop{
+		Model:       config.ModelFromGuest(cfg.Model),
+		Repo:        repo,
+		MCP:         mcpMgr,
+		ContextFile: agent.DefaultContextFile,
+		Stream:      bclient.Stream,
+	}
 	if err := loop.LoadContext(); err != nil {
 		fmt.Fprintf(os.Stderr, "abox-guest: context: %v\n", err)
 	}
@@ -86,9 +93,26 @@ func run() error {
 	if ack.Error != nil {
 		return ack.Error
 	}
+	if len(ack.Result) > 0 {
+		var ackRes protocol.HelloResult
+		if err := json.Unmarshal(ack.Result, &ackRes); err == nil {
+			bclient.SetHostProtocol(ackRes.Protocol)
+		}
+	}
 
 	w := &connWriter{c: conn}
+	bclient.AttachContext(w.writeContext)
 	turns := &turnTracker{}
+	shutdownHandled := false
+	defer bclient.Close(errors.New("guest connection closed"))
+	defer func() {
+		if shutdownHandled {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		turns.cancelAllAndWait(ctx)
+	}()
 	var archive bytes.Buffer
 	for {
 		frame, err := protocol.ReadFrame(conn)
@@ -98,13 +122,16 @@ func run() error {
 			}
 			return err
 		}
+		if bclient.HandleFrame(frame) {
+			continue
+		}
 		switch frame.Method {
 		case "user_turn":
 			if !turns.start(frame.ID) {
 				_ = w.write(protocol.Frame{V: protocol.Version, ID: frame.ID, Error: &protocol.Error{Code: "guest", Message: "turn already in progress"}})
 				continue
 			}
-			go runTurn(w, turns, loop, frame)
+			go runTurn(w, turns, loop, bclient, frame)
 		case "cancel_turn":
 			p, e := protocol.DecodeParams[protocol.CancelTurnParams](frame.Params)
 			if e != nil {
@@ -114,34 +141,84 @@ func run() error {
 			turns.cancel(p.ID)
 			ok, _ := protocol.EncodeParams(map[string]bool{"ok": true})
 			_ = w.write(protocol.Frame{V: protocol.Version, ID: frame.ID, Result: ok})
+		case "shutdown":
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			stopped := turns.cancelAllAndWait(ctx)
+			cancel()
+			shutdownHandled = true
+			if !stopped {
+				return fmt.Errorf("active turn did not stop before shutdown timeout")
+			}
+			_ = loop.SaveContext()
+			ok, _ := protocol.EncodeParams(map[string]bool{"ok": true})
+			if err := w.write(protocol.Frame{V: protocol.Version, ID: frame.ID, Result: ok}); err != nil {
+				return err
+			}
+			return nil
 		default:
 			resp := handle(loop, repo, mcpMgr, &archive, frame)
 			if err := w.write(resp); err != nil {
 				return err
-			}
-			if frame.Method == "shutdown" {
-				turns.cancelAll()
-				return nil
 			}
 		}
 	}
 }
 
 type connWriter struct {
-	mu sync.Mutex
-	c  net.Conn
+	once sync.Once
+	gate chan struct{}
+	c    net.Conn
 }
 
 func (w *connWriter) write(f protocol.Frame) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return protocol.WriteFrame(w.c, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return w.writeContext(ctx, f)
+}
+
+func (w *connWriter) writeContext(ctx context.Context, f protocol.Frame) error {
+	w.once.Do(func() {
+		w.gate = make(chan struct{}, 1)
+		w.gate <- struct{}{}
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.gate:
+	}
+	defer func() { w.gate <- struct{}{} }()
+	done := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			select {
+			case <-done:
+			default:
+				_ = w.c.Close()
+			}
+		}
+		close(watchDone)
+	}()
+	err := protocol.WriteFrame(w.c, f)
+	close(done)
+	<-watchDone
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 type turnTracker struct {
-	mu     sync.Mutex
-	active string
-	stop   context.CancelFunc
+	mu       sync.Mutex
+	active   string
+	stop     context.CancelFunc
+	canceled bool
+	finished chan struct{}
 }
 
 func (t *turnTracker) start(id string) bool {
@@ -151,30 +228,55 @@ func (t *turnTracker) start(id string) bool {
 		return false
 	}
 	t.active = id
+	t.canceled = false
+	t.finished = make(chan struct{})
 	return true
 }
 
 func (t *turnTracker) setCancel(id string, cancel context.CancelFunc) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	shouldCancel := false
 	if t.active == id {
 		t.stop = cancel
+		shouldCancel = t.canceled
+	}
+	t.mu.Unlock()
+	if shouldCancel {
+		cancel()
 	}
 }
 
 func (t *turnTracker) cancel(id string) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.active == id && t.stop != nil {
-		t.stop()
+	var stop context.CancelFunc
+	if t.active == id {
+		t.canceled = true
+		stop = t.stop
+	}
+	t.mu.Unlock()
+	if stop != nil {
+		stop()
 	}
 }
 
-func (t *turnTracker) cancelAll() {
+func (t *turnTracker) cancelAllAndWait(ctx context.Context) bool {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.stop != nil {
-		t.stop()
+	if t.active == "" {
+		t.mu.Unlock()
+		return true
+	}
+	t.canceled = true
+	stop := t.stop
+	finished := t.finished
+	t.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	select {
+	case <-finished:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -182,12 +284,18 @@ func (t *turnTracker) done(id string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.active == id {
+		finished := t.finished
 		t.active = ""
 		t.stop = nil
+		t.canceled = false
+		t.finished = nil
+		if finished != nil {
+			close(finished)
+		}
 	}
 }
 
-func runTurn(w *connWriter, turns *turnTracker, loop *agent.Loop, req protocol.Frame) {
+func runTurn(w *connWriter, turns *turnTracker, loop *agent.Loop, bclient *brokerclient.Client, req protocol.Frame) {
 	defer turns.done(req.ID)
 	p, err := protocol.DecodeParams[protocol.UserTurnParams](req.Params)
 	if err != nil {
@@ -204,6 +312,11 @@ func runTurn(w *connWriter, turns *turnTracker, loop *agent.Loop, req protocol.F
 	turns.setCancel(req.ID, cancel)
 	loop.MaxTurns = p.MaxTurns
 	loop.Rich = p.RichEvents
+	if p.RichEvents {
+		loop.Stream = bclient.StreamWithUsage
+	} else {
+		loop.Stream = bclient.Stream
+	}
 	loop.OnEvent = func(ev protocol.AgentEvent) {
 		raw, _ := protocol.EncodeParams(ev)
 		_ = w.write(protocol.Frame{ID: req.ID, Method: "agent_event", Params: raw})
@@ -254,7 +367,6 @@ func handle(loop *agent.Loop, repo tools.Repo, mcpMgr *guestmcp.Manager, archive
 			err = e
 			break
 		}
-		applySecrets(p.Secrets)
 		loop.Model = config.ModelFromGuest(p.Model)
 		out.Result, _ = protocol.EncodeParams(map[string]bool{"ok": true})
 	case "archive_chunk":

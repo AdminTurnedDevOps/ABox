@@ -172,7 +172,7 @@ func WriteTranscript(path string, lines []string) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-func (s *Session) WriteGuestConfig(model config.Model, secrets map[string]string, servers []config.MCPServer) error {
+func (s *Session) WriteGuestConfig(model config.Model, servers []config.MCPServer) error {
 	var gs []protocol.GuestMCPServer
 	for _, srv := range servers {
 		gs = append(gs, protocol.GuestMCPServer{
@@ -188,7 +188,6 @@ func (s *Session) WriteGuestConfig(model config.Model, secrets map[string]string
 		VsockPort:  protocol.RPCPort,
 		RepoDir:    protocol.GuestRepoDir,
 		Model:      model.ToGuest(),
-		Secrets:    secrets,
 		MCPServers: gs,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -196,6 +195,33 @@ func (s *Session) WriteGuestConfig(model config.Model, secrets map[string]string
 		return err
 	}
 	return os.WriteFile(s.GuestConfigJSON(), data, 0o600)
+}
+
+// ConfigDiskSize is the fixed size of the sealed read-only config disk.
+const ConfigDiskSize = 1 << 20
+
+// WritePaddedConfig writes data to path zero-padded to ConfigDiskSize bytes
+// and leaves the file read-only (mode 0400). It is the shared writer for the
+// config.raw disk: creation, resume rewrite, and secret scrubbing all keep
+// the same layout the guest parses (JSON, then NUL padding).
+func WritePaddedConfig(path string, data []byte) error {
+	if len(data) > ConfigDiskSize {
+		return fmt.Errorf("config disk payload too large: %d", len(data))
+	}
+	// Resume rewrites config.raw; the previous run left it mode 0400.
+	_ = os.Chmod(path, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if _, err := f.Write(make([]byte, ConfigDiskSize-len(data))); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o400)
 }
 
 func randomHex(n int) (string, error) {

@@ -137,7 +137,7 @@ Clone of (1) for that run. This is /dev/vda → /. Repo, guest Git, agent writes
 ABox does not boot (1). It copies (1) → (2), then the microVM uses (2). --resume skips the copy and boots the existing (2).
 
 3. Config disk — sessions/<id>/config.raw
-~1 MiB, read-only /dev/vdb. Session id, model, keys. Not cloned from the golden image, not an OS. It lives inside of the directory where your sandbox harness session lives.
+~1 MiB, read-only /dev/vdb. Session id, model. Not cloned from the golden image, not an OS. It lives inside of the directory where your sandbox harness session lives.
 
 The VM boots **only** the session clone, not the golden file. Destroy a session directory and that run’s guest files are gone; the golden image stays clean for the next `abox`. `make image-update` patches `/usr/local/bin/abox-guest` on an existing golden disk; `make image` rebuilds the golden disk from scratch.
 
@@ -239,10 +239,10 @@ abox exec --prompt "list the repository files"
 
 ## LLM Integration
 
-ABox is an LLM **client/harness**. The model loop/context is not on the host (your ABox instance/harness running on your computer). Prompts, streaming, tool calls, and provider HTTPS all run inside `abox-guest` in the microVM. The host TUI forwards your text over vsock (`user_turn`) and renders `agent_event` frames. That is the same isolation idea as MCP: the sandbox is the trust boundary for anything the model sees or starts.
+ABox is an LLM **client/harness**. The model loop/context is not on the host (your ABox instance/harness running on your computer). Prompts, streaming, and tool calls run inside `abox-guest` in the microVM. Provider HTTPS is brokered by the host. The host TUI forwards your text over vsock (`user_turn`) and renders `agent_event` frames. That is the same isolation idea as MCP: the sandbox is the trust boundary for anything the model sees or starts.
 
 ```go
-func Stream(ctx context.Context, model config.Model, messages []Message, tools []ToolSchema) (<-chan Event, error)
+func Stream(ctx context.Context, model config.Model, key string, client *http.Client, messages []Message, tools []ToolSchema) (<-chan Event, error)
 ```
 
 `Stream` talks to one configured profile. xAI and OpenAI use Chat Completions (`/chat/completions`). Anthropic uses Messages (`/v1/messages`). Provider-side shell, code execution, and file tools stay off. The model only sees ABox’s five guest tools plus any MCP tools discovered in the guest.
@@ -250,7 +250,17 @@ func Stream(ctx context.Context, model config.Model, messages []Message, tools [
 ![](img/prov1.png)
 ![](img/prov2.png)
 
-Config lives at `~/.abox/config.yaml`. Keys are **not** stored in that file. `/provider` in the TUI writes `~/.abox/credentials.env` (mode 0600) and copies the value onto the sealed guest `config.raw` disk so the microVM can dial the API. Same as direct-mode MCP: the token has to live in the guest because the guest makes the HTTPS call.
+Config lives at `~/.abox/config.yaml`. Keys are **not** stored in that file. Credential sources: `env`, `keychain` (macOS), `vault`, `azure`, `aws`. `/provider` in the TUI saves to the macOS keychain first (service `abox`), falling back to `~/.abox/credentials.env` (mode 0600). LLM keys stay on the host. MCP tokens still go to the guest because the guest makes those HTTPS calls.
+
+```yaml
+credential:
+  source: keychain            # env | keychain | vault | azure | aws
+  name: ANTHROPIC_API_KEY     # env var, keychain account, vault path, Azure secret URI, or AWS secret id
+  # field: value              # vault/aws only
+  # version: "4"              # vault/azure only
+```
+
+`credential_env: XAI_API_KEY` is the same as `{source: env, name: XAI_API_KEY}`. Vault needs `VAULT_ADDR` + `VAULT_TOKEN`. Azure needs `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET` (or `az login`). AWS needs `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`. `abox creds migrate` moves existing `credentials.env` entries into the keychain.
 
 Default profiles:
 
@@ -277,9 +287,9 @@ models:
 
 Pick one in the TUI with `/provider`, or pass `--model grok-default` (and the other profile names) on `abox` / `abox exec`. Missing `XAI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` fails the turn, not VM boot (`abox --probe-vm` still works).
 
-Guest egress is allowlisted: `api.x.ai`, `api.openai.com`, `api.anthropic.com` on HTTPS `:443` only. Those sockets leave via libkrun TSI inet (no guest NIC). Isolation is still **Planned**. A compromised guest can read the key on `config.raw`; the allowlist is ABox’s Go dialer, not a VMM guarantee.
+Guest egress is allowlisted for configured MCP origins on HTTPS `:443` via libkrun TSI inet (no guest NIC). Provider HTTPS is host-brokered, so those hosts are not on the guest allowlist. Isolation is still **Planned**. The allowlist is ABox’s Go dialer, not a VMM guarantee.
 
-LLM traffic does **not** take the MCP `connectivity.mode` path. Direct vs agentgateway today applies to MCP servers. The model client always hits the provider `base_url` above.
+LLM traffic does **not** take the MCP `connectivity.mode` path. Direct vs agentgateway today applies to MCP servers. The host broker hits the provider `base_url` above.
 
 ## MCP Integration
 
@@ -412,14 +422,14 @@ Because of the above, Go or Rust are naturally great languages. Because I like G
 
 ## What is not done yet
 
-Compaction, checkpoint/rollback/fork, stdio MCP, host broker, and resource
+Compaction, checkpoint/rollback/fork, stdio MCP, host MCP/package broker, and resource
 acceptance. See `PLAN.md`. Streamable HTTP MCP is in; isolation stays Planned.
 
 ## Security
 
 Do not describe this build as verified isolation. The device plan is
-allowlisted (no guest NIC, no host-path virtio-fs, TSI flags zero). Claims
-stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
+allowlisted (no guest NIC, no host-path virtio-fs). TSI inet is MCP HTTPS only.
+Claims stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
 ## Whats Currently In Place
 
 ```
@@ -436,7 +446,7 @@ stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ Providers        │ Grok/OpenAI (chat completions) + Anthropic Messages. /provider keys. │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ LLM egress       │ Allowlist: api.x.ai, api.openai.com, api.anthropic.com via TSI inet  │
+│ LLM egress       │ Host broker dials providers. Guest TSI inet is MCP-only              │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ MCP              │ Guest Streamable HTTP client; direct URLs or exclusive agentgateway  │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤

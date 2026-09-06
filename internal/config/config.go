@@ -25,11 +25,32 @@ type File struct {
 }
 
 type Model struct {
-	Name          string `yaml:"name"`
-	Provider      string `yaml:"provider"`
-	Model         string `yaml:"model"`
-	CredentialEnv string `yaml:"credential_env"`
-	BaseURL       string `yaml:"base_url,omitempty"`
+	Name          string         `yaml:"name"`
+	Provider      string         `yaml:"provider"`
+	Model         string         `yaml:"model"`
+	CredentialEnv string         `yaml:"credential_env,omitempty"` // DEPRECATED: alias for credential {source: env, name: X}
+	Credential    *CredentialRef `yaml:"credential,omitempty"`
+	BaseURL       string         `yaml:"base_url,omitempty"`
+}
+
+type CredentialRef struct {
+	Source  string `yaml:"source"`
+	Name    string `yaml:"name"`
+	Field   string `yaml:"field,omitempty"`   // vault/aws only
+	Version string `yaml:"version,omitempty"` // vault/azure only
+}
+
+type AzureCloud struct {
+	KeyVaultDNSSuffix string
+	AuthorityHost     string
+	VaultResource     string
+}
+
+var azureClouds = []AzureCloud{
+	{KeyVaultDNSSuffix: "vault.azure.net", AuthorityHost: "https://login.microsoftonline.com", VaultResource: "https://vault.azure.net"},
+	{KeyVaultDNSSuffix: "vault.usgovcloudapi.net", AuthorityHost: "https://login.microsoftonline.us", VaultResource: "https://vault.usgovcloudapi.net"},
+	{KeyVaultDNSSuffix: "vault.azure.cn", AuthorityHost: "https://login.chinacloudapi.cn", VaultResource: "https://vault.azure.cn"},
+	{KeyVaultDNSSuffix: "vault.microsoftazure.de", AuthorityHost: "https://login.microsoftonline.de", VaultResource: "https://vault.microsoftazure.de"},
 }
 
 type Connectivity struct {
@@ -38,12 +59,13 @@ type Connectivity struct {
 }
 
 type MCPServer struct {
-	Name          string   `yaml:"name"`
-	URL           string   `yaml:"url"`
-	CredentialEnv string   `yaml:"credential_env,omitempty"`
-	ClientID      string   `yaml:"client_id,omitempty"`
-	Scopes        []string `yaml:"scopes,omitempty"`
-	ToolAllowlist []string `yaml:"tool_allowlist,omitempty"`
+	Name          string         `yaml:"name"`
+	URL           string         `yaml:"url"`
+	CredentialEnv string         `yaml:"credential_env,omitempty"` // DEPRECATED: alias for credential {source: env, name: X}
+	Credential    *CredentialRef `yaml:"credential,omitempty"`
+	ClientID      string         `yaml:"client_id,omitempty"`
+	Scopes        []string       `yaml:"scopes,omitempty"`
+	ToolAllowlist []string       `yaml:"tool_allowlist,omitempty"`
 }
 
 var mcpNameRE = regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -126,11 +148,10 @@ func EnsureLayout() error {
 }
 
 func seedFromLegacy() error {
-	home := homeDir()
-	if home == "" {
+	legacy := LegacyAppSupportDir()
+	if legacy == "" {
 		return nil
 	}
-	legacy := filepath.Join(home, "Library", "Application Support", "ABox")
 	for _, name := range []string{"config.yaml", "credentials.env"} {
 		dst := filepath.Join(Dir(), name)
 		if exists(dst) {
@@ -147,6 +168,35 @@ func seedFromLegacy() error {
 		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			return fmt.Errorf("seed %s: %w", name, err)
 		}
+	}
+	return scrubLegacyAppSupportCredentials(legacy)
+}
+
+// LegacyAppSupportDir is the pre-~/.abox macOS location. Dir() never returns
+// it; it is only used to seed a missing ~/.abox and to scrub leftover secrets.
+func LegacyAppSupportDir() string {
+	home := homeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "Library", "Application Support", "ABox")
+}
+
+func scrubLegacyAppSupportCredentials(legacy string) error {
+	path := filepath.Join(legacy, "credentials.env")
+	if !exists(path) {
+		return nil
+	}
+	body := []byte("# ABox credentials. Mode 0600. Do not commit.\n# Leftover Application Support copy; credentials now live under ~/.abox or the macOS keychain.\n")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return fmt.Errorf("scrub legacy credentials: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("scrub legacy credentials: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("scrub legacy credentials: %w", err)
 	}
 	return nil
 }
@@ -180,6 +230,24 @@ func (c File) Validate() error {
 		}
 		seen[s.Name] = struct{}{}
 	}
+	for i, m := range c.Models {
+		if err := m.validate(); err != nil {
+			return fmt.Errorf("models[%d]: %w", i, err)
+		}
+	}
+	destinations := make(map[string]string, len(c.Models)+len(c.MCPServers))
+	for _, m := range c.Models {
+		if _, exists := destinations[m.EnvName()]; !exists {
+			destinations[m.EnvName()] = fmt.Sprintf("model %q", m.Name)
+		}
+	}
+	for _, s := range c.MCPServers {
+		dest := TokenEnv(s)
+		if previous, exists := destinations[dest]; exists {
+			return fmt.Errorf("credential destination env %q is shared by %s and mcp server %q", dest, previous, s.Name)
+		}
+		destinations[dest] = fmt.Sprintf("mcp server %q", s.Name)
+	}
 	if c.Runtime.Isolation != "" && c.Runtime.Isolation != "microvm" {
 		return fmt.Errorf("isolation must be microvm")
 	}
@@ -199,10 +267,180 @@ func (s MCPServer) validate() error {
 	if err := validateHTTPSURL("url", s.URL); err != nil {
 		return err
 	}
+	if s.CredentialEnv != "" && s.Credential != nil {
+		return fmt.Errorf("set either credential or credential_env, not both")
+	}
 	if s.CredentialEnv != "" && !ValidEnvName(s.CredentialEnv) {
 		return fmt.Errorf("invalid credential_env %q", s.CredentialEnv)
 	}
+	if s.Credential != nil {
+		if err := s.Credential.validate(); err != nil {
+			return fmt.Errorf("credential: %w", err)
+		}
+	}
 	return nil
+}
+
+func (m Model) validate() error {
+	if m.CredentialEnv != "" && m.Credential != nil {
+		return fmt.Errorf("set either credential or credential_env, not both")
+	}
+	if m.CredentialEnv != "" && !ValidEnvName(m.CredentialEnv) {
+		return fmt.Errorf("invalid credential_env %q", m.CredentialEnv)
+	}
+	if m.Credential != nil {
+		if err := m.Credential.validate(); err != nil {
+			return fmt.Errorf("credential: %w", err)
+		}
+	}
+	return nil
+}
+
+var credentialSources = map[string]struct{}{
+	"env":      {},
+	"keychain": {},
+	"vault":    {},
+	"azure":    {},
+	"aws":      {},
+}
+
+func (c CredentialRef) validate() error {
+	if _, ok := credentialSources[c.Source]; !ok {
+		return fmt.Errorf("unknown source %q (want env, keychain, vault, azure, or aws)", c.Source)
+	}
+	if strings.TrimSpace(c.Name) == "" {
+		return fmt.Errorf("name is required")
+	}
+	switch c.Source {
+	case "env", "keychain":
+		if c.Field != "" {
+			return fmt.Errorf("field is not supported for source %q", c.Source)
+		}
+		if c.Version != "" {
+			return fmt.Errorf("version is not supported for source %q", c.Source)
+		}
+		if !ValidEnvName(c.Name) {
+			return fmt.Errorf("invalid %s credential name %q", c.Source, c.Name)
+		}
+	case "vault":
+		if c.Version != "" && !isNumeric(c.Version) {
+			return fmt.Errorf("version %q must be numeric for vault", c.Version)
+		}
+	case "aws":
+		if c.Version != "" {
+			return fmt.Errorf("version is not supported for source %q", c.Source)
+		}
+	case "azure":
+		if c.Field != "" {
+			return fmt.Errorf("field is not supported for source %q", c.Source)
+		}
+		if _, _, _, _, err := ParseAzureSecretReference(c.Name, c.Version); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ParseAzureSecretReference validates and canonicalizes an Azure Key Vault
+// secret identifier. Only first-party data-plane DNS suffixes are accepted so
+// callers can safely attach an Azure bearer token to the returned URI.
+func ParseAzureSecretReference(name, requestedVersion string) (uri, secretName, version string, cloud AzureCloud, err error) {
+	raw := strings.TrimSpace(name)
+	u, parseErr := url.Parse(raw)
+	if parseErr != nil || u.Scheme != "https" || u.Opaque != "" || u.Host == "" || u.User != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+		err = fmt.Errorf("azure credential name must be an https secret URI for Azure Key Vault like https://vault.vault.azure.net/secrets/name")
+		return
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, candidate := range azureClouds {
+		suffix := "." + candidate.KeyVaultDNSSuffix
+		if strings.HasSuffix(host, suffix) {
+			vaultName := strings.TrimSuffix(host, suffix)
+			if strings.Contains(vaultName, ".") || !validAzureVaultName(vaultName) {
+				break
+			}
+			cloud = candidate
+			break
+		}
+	}
+	if cloud.KeyVaultDNSSuffix == "" {
+		err = fmt.Errorf("azure credential host %q is not a supported Azure Key Vault endpoint", u.Hostname())
+		return
+	}
+	if u.RawPath != "" {
+		err = fmt.Errorf("azure credential path must not contain escaped characters")
+		return
+	}
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(parts) < 2 || len(parts) > 3 || parts[0] != "secrets" || !validAzureSecretPart(parts[1]) {
+		err = fmt.Errorf("azure credential name must point at /secrets/<name> with an optional version")
+		return
+	}
+	secretName = parts[1]
+	if len(parts) == 3 {
+		if !validAzureSecretPart(parts[2]) {
+			err = fmt.Errorf("azure credential URI has an invalid secret version")
+			return
+		}
+		version = parts[2]
+	} else if requestedVersion != "" {
+		if !validAzureSecretPart(requestedVersion) {
+			err = fmt.Errorf("azure credential version %q is invalid", requestedVersion)
+			return
+		}
+		version = requestedVersion
+	}
+	u.Scheme = "https"
+	u.Host = host
+	u.Path = "/secrets/" + secretName
+	if version != "" {
+		u.Path += "/" + version
+	}
+	uri = u.String()
+	return
+}
+
+func validAzureVaultName(name string) bool {
+	if len(name) < 3 || len(name) > 24 || name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+	if last := name[len(name)-1]; !asciiAlphaNumeric(last) {
+		return false
+	}
+	for i := 1; i < len(name)-1; i++ {
+		if !asciiAlphaNumeric(name[i]) && name[i] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validAzureSecretPart(part string) bool {
+	if len(part) == 0 || len(part) > 127 {
+		return false
+	}
+	for i := range part {
+		if !asciiAlphaNumeric(part[i]) && part[i] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiAlphaNumeric(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateHTTPSURL(field, raw string) error {
@@ -247,12 +485,42 @@ func ValidEnvName(name string) bool {
 	return true
 }
 
+func (m Model) EnvName() string {
+	if m.CredentialEnv != "" {
+		return m.CredentialEnv
+	}
+	for _, p := range DefaultProviders() {
+		if p.Provider == m.Provider {
+			return p.Env
+		}
+	}
+	n := strings.ToUpper(strings.ReplaceAll(m.Name, "-", "_"))
+	return "ABOX_MODEL_" + n + "_KEY"
+}
+
+func (m Model) CredentialReference() CredentialRef {
+	if m.Credential != nil {
+		return *m.Credential
+	}
+	if m.CredentialEnv != "" {
+		return CredentialRef{Source: "env", Name: m.CredentialEnv}
+	}
+	return CredentialRef{Source: "env", Name: m.EnvName()}
+}
+
+func (s MCPServer) CredentialReference() CredentialRef {
+	if s.Credential != nil {
+		return *s.Credential
+	}
+	return CredentialRef{Source: "env", Name: TokenEnv(s)}
+}
+
 func (m Model) ToGuest() protocol.GuestModel {
 	return protocol.GuestModel{
 		Name:          m.Name,
 		Provider:      m.Provider,
 		Model:         m.Model,
-		CredentialEnv: m.CredentialEnv,
+		CredentialEnv: m.EnvName(),
 		BaseURL:       m.BaseURL,
 	}
 }
@@ -276,26 +544,6 @@ func (r Resources) Resolved() (vcpu, ram int) {
 		ram = vmmconfig.DefaultRAMMiB
 	}
 	return
-}
-
-func (c File) SecretsFromEnv() map[string]string {
-	out := map[string]string{}
-	for _, env := range ProviderCredentialEnvs() {
-		if v := os.Getenv(env); v != "" {
-			out[env] = v
-		}
-	}
-	servers, err := c.ResolvedMCPServers()
-	if err != nil {
-		return out
-	}
-	for _, s := range servers {
-		name := TokenEnv(s)
-		if v := os.Getenv(name); v != "" {
-			out[name] = v
-		}
-	}
-	return out
 }
 
 func GuestImagePath() string {
@@ -391,13 +639,6 @@ func (c File) ModelNamed(name string) (Model, bool) {
 		return c.Models[0], true
 	}
 	return Model{}, false
-}
-
-func (m Model) CredentialPresent() bool {
-	if m.CredentialEnv == "" {
-		return false
-	}
-	return strings.TrimSpace(os.Getenv(m.CredentialEnv)) != ""
 }
 
 func Path() string {
