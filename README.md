@@ -5,7 +5,7 @@ An always-on, isolated agent harness.
 The agent, prompts, model calls, and tools runs in isolation.
 
 <p align="center">
-  <img src="img/aboxlogo.jpg" alt="ABox" width="520">
+  <img src="img/aboxlogo.gif" alt="ABox" width="520">
 </p>
 
 <p align="center">
