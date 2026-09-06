@@ -40,7 +40,41 @@ brew trust libkrun/krun
 brew install libkrun libkrunfw
 ```
 
-Confirm `kern.hv_support` is `1`.
+## Quickstart
+
+From this repo (or any directory). If Git is missing, dirty, or has no
+commits, ABox copies the files into a private snapshot and leaves your
+host Git alone.
+
+`make image`: uses Docker once (today) to pack a raw ext4 root filesystem
+(`~/.abox/images/abox-guest.raw`): Alpine userspace, git, patch, and
+abox-guest. Not the guest kernel. Needed the first time, or when you want a
+full disk rebuild. Depends on `make guest`.
+
+`make build` compiles the three binaries into `bin/` (`abox`, `vmm`, and `guest`):
+
+| | `abox` | `vmm` |
+| --- | --- | --- |
+| Package | `./cmd/abox` | `./cmd/abox-vmm` |
+| Binary | TUI / CLI (supervisor) | libkrun helper |
+| Build | plain `go build` | cgo + libkrun/libkrunfw (Apple Silicon) |
+| Sign | no | yes — Hypervisor.framework entitlements |
+
+`guest` is `abox-guest-linux-arm64`: Linux agent, built for the VM (`GOOS=linux GOARCH=arm64`).
+
+```bash
+make build
+make image
+export PATH="$PWD/bin:$PATH"
+abox
+```
+
+- `/provider` sets Grok, OpenAI, or Anthropic API keys
+- `/mcp` lists configured Streamable HTTP MCP servers and accepts a Bearer token (`abox mcp login` for OAuth)
+- `abox --resume` reopens the latest session for this repo (same `root.raw`, LLM conversation, and TUI transcript). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
+- `ctrl+c` quits
+- The agent runs only inside the guest (MicroVM)
+
 
 ## microVM > Docker
 
@@ -108,41 +142,6 @@ The VM boots **only** the session clone, not the golden file. Destroy a session 
 ### Resume Command
 
 `abox --resume` does **not** clone the golden image again. It boots the existing `root.raw` for that session and the guest reloads conversation state from `/var/lib/abox/context.json` on that disk. The TUI reloads the same transcript (host `transcript.json`, or the guest context if that file is missing). The host git tree is not re-copied (that would overwrite guest work).
-
-## Quickstart
-
-From this repo (or any directory). If Git is missing, dirty, or has no
-commits, ABox copies the files into a private snapshot and leaves your
-host Git alone.
-
-`make image`: uses Docker once (today) to pack a raw ext4 root filesystem
-(`~/.abox/images/abox-guest.raw`): Alpine userspace, git, patch, and
-abox-guest. Not the guest kernel. Needed the first time, or when you want a
-full disk rebuild. Depends on `make guest`.
-
-`make build` compiles the three binaries into `bin/` (`abox`, `vmm`, and `guest`):
-
-| | `abox` | `vmm` |
-| --- | --- | --- |
-| Package | `./cmd/abox` | `./cmd/abox-vmm` |
-| Binary | TUI / CLI (supervisor) | libkrun helper |
-| Build | plain `go build` | cgo + libkrun/libkrunfw (Apple Silicon) |
-| Sign | no | yes — Hypervisor.framework entitlements |
-
-`guest` is `abox-guest-linux-arm64`: Linux agent, built for the VM (`GOOS=linux GOARCH=arm64`).
-
-```bash
-make build
-make image
-export PATH="$PWD/bin:$PATH"
-abox
-```
-
-- `/provider` sets Grok, OpenAI, or Anthropic API keys
-- `/mcp` lists configured Streamable HTTP MCP servers and accepts a Bearer token (`abox mcp login` for OAuth)
-- `abox --resume` reopens the latest session for this repo (same `root.raw`, LLM conversation, and TUI transcript). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
-- `ctrl+c` quits
-- The agent runs only inside the guest (MicroVM)
 
 ## Release
 
