@@ -250,18 +250,6 @@ func Stream(ctx context.Context, model config.Model, key string, client *http.Cl
 ![](img/prov1.png)
 ![](img/prov2.png)
 
-Config lives at `~/.abox/config.yaml`. Keys are **not** stored in that file. Credential sources: `env`, `keychain` (macOS), `vault`, `azure`, `aws`. `/provider` in the TUI saves to the macOS keychain first (service `abox`), falling back to `~/.abox/credentials.env` (mode 0600). LLM keys stay on the host. MCP tokens still go to the guest because the guest makes those HTTPS calls.
-
-```yaml
-credential:
-  source: keychain            # env | keychain | vault | azure | aws
-  name: ANTHROPIC_API_KEY     # env var, keychain account, vault path, Azure secret URI, or AWS secret id
-  # field: value              # vault/aws only
-  # version: "4"              # vault/azure only
-```
-
-`credential_env: XAI_API_KEY` is the same as `{source: env, name: XAI_API_KEY}`. Vault needs `VAULT_ADDR` + `VAULT_TOKEN`. Azure needs `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET` (or `az login`). AWS needs `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`. `abox creds migrate` moves existing `credentials.env` entries into the keychain.
-
 Default profiles:
 
 ```yaml
@@ -291,6 +279,32 @@ Guest egress is allowlisted for configured MCP origins on HTTPS `:443` via libkr
 
 LLM traffic does **not** take the MCP `connectivity.mode` path. Direct vs agentgateway today applies to MCP servers. The host broker hits the provider `base_url` above.
 
+## Credentials
+
+Config lives at `~/.abox/config.yaml`. Keys are **not** stored in that file. Each model or MCP server points at a source:
+
+```yaml
+credential:
+  source: keychain            # env | keychain | vault | azure | aws
+  name: ANTHROPIC_API_KEY     # env var, keychain account, vault path, Azure secret URI, or AWS secret id
+  # field: value              # vault/aws only
+  # version: "4"              # vault/azure only
+```
+
+| Source | `name` is | Auth |
+| --- | --- | --- |
+| `env` | environment variable (also reads `~/.abox/credentials.env`) | — |
+| `keychain` | macOS keychain account (service `abox`) | — |
+| `vault` | Vault KV v2 path (`secret/abox/anthropic`) | `VAULT_ADDR` + `VAULT_TOKEN` (or `~/.vault-token`) |
+| `azure` | Key Vault secret URI (`https://myvault.vault.azure.net/secrets/name`) | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, or `az login` |
+| `aws` | Secrets Manager secret id | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`AWS_REGION`) |
+
+`credential_env: XAI_API_KEY` is the same as `{source: env, name: XAI_API_KEY}`.
+
+`/provider` and `/mcp` in the TUI save to the macOS keychain first, falling back to `credentials.env` (mode 0600) if the keychain is locked or missing. `abox creds migrate` moves existing `credentials.env` entries into the keychain.
+
+LLM keys stay on the host. MCP tokens still go to the guest because the guest makes those HTTPS calls.
+
 ## MCP Integration
 
 ABox is an MCP **client**. Remote tools are Streamable HTTP. Stdio MCP is not implemented.
@@ -311,7 +325,7 @@ type StreamableClientTransport struct {
 
 ![](img/mcpsandbox.png.png)
 
-Config lives at `~/.abox/config.yaml` (same pattern as `~/.claude`, `~/.codex`). First `abox` run creates `~/.abox/` (mode 0700) and a default `config.yaml` if they are missing. Credentials are `~/.abox/credentials.env`.
+Config lives at `~/.abox/config.yaml` (same pattern as `~/.claude`, `~/.codex`). First `abox` run creates `~/.abox/` (mode 0700) and a default `config.yaml` if they are missing. MCP tokens use the same credential sources as LLM keys (see [Credentials](#credentials)).
 
 Add a Streamable HTTP server without editing YAML by hand. `--mode` is required:
 
