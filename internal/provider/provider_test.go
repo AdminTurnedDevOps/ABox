@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -13,7 +12,6 @@ import (
 )
 
 func TestStreamOpenAITextAndUsage(t *testing.T) {
-	t.Setenv("TEST_KEY", "k")
 	body := strings.Join([]string{
 		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
 		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}`,
@@ -24,6 +22,9 @@ func TestStreamOpenAITextAndUsage(t *testing.T) {
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("path %s", r.URL.Path)
 		}
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Errorf("authorization %q", r.Header.Get("Authorization"))
+		}
 		raw, _ := io.ReadAll(r.Body)
 		if !strings.Contains(string(raw), "include_usage") {
 			t.Error("expected stream_options include_usage")
@@ -32,13 +33,10 @@ func TestStreamOpenAITextAndUsage(t *testing.T) {
 		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(srv.Close)
-	old := newHTTPClient
-	newHTTPClient = func() *http.Client { return srv.Client() }
-	t.Cleanup(func() { newHTTPClient = old })
 
 	ch, err := StreamWithUsage(context.Background(), config.Model{
 		Provider: "openai", Model: "gpt", CredentialEnv: "TEST_KEY", BaseURL: srv.URL,
-	}, []Message{{Role: "user", Content: "q"}}, nil)
+	}, "test-key", srv.Client(), []Message{{Role: "user", Content: "q"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,32 +55,26 @@ func TestStreamOpenAITextAndUsage(t *testing.T) {
 }
 
 func TestStreamOpenAIErrorStatus(t *testing.T) {
-	t.Setenv("TEST_KEY", "k")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusBadRequest)
 	}))
 	t.Cleanup(srv.Close)
-	old := newHTTPClient
-	newHTTPClient = func() *http.Client { return srv.Client() }
-	t.Cleanup(func() { newHTTPClient = old })
 	_, err := Stream(context.Background(), config.Model{
 		Provider: "openai", Model: "gpt", CredentialEnv: "TEST_KEY", BaseURL: srv.URL,
-	}, nil, nil)
+	}, "test-key", srv.Client(), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "400") {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestStreamMissingKey(t *testing.T) {
-	os.Unsetenv("MISSING_ABOX_KEY")
-	_, err := Stream(context.Background(), config.Model{CredentialEnv: "MISSING_ABOX_KEY"}, nil, nil)
-	if err == nil {
-		t.Fatal("expected missing credential")
+	_, err := Stream(context.Background(), config.Model{CredentialEnv: "MISSING_ABOX_KEY"}, "", nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "missing credential") {
+		t.Fatalf("got %v", err)
 	}
 }
 
-func TestStreamAnthropicText(t *testing.T) {
-	t.Setenv("TEST_KEY", "k")
+func TestStreamAnthropicTextAndKeyHeader(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":4}}}`,
 		`data: {"type":"content_block_delta","delta":{"text":"yo"}}`,
@@ -90,16 +82,16 @@ func TestStreamAnthropicText(t *testing.T) {
 		"",
 	}, "\n")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "test-key" {
+			t.Errorf("x-api-key %q", r.Header.Get("x-api-key"))
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(srv.Close)
-	old := newHTTPClient
-	newHTTPClient = func() *http.Client { return srv.Client() }
-	t.Cleanup(func() { newHTTPClient = old })
 	ch, err := Stream(context.Background(), config.Model{
 		Provider: "anthropic", Model: "claude", CredentialEnv: "TEST_KEY", BaseURL: srv.URL,
-	}, []Message{{Role: "user", Content: "q"}}, nil)
+	}, "test-key", srv.Client(), []Message{{Role: "user", Content: "q"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,5 +106,12 @@ func TestStreamAnthropicText(t *testing.T) {
 	}
 	if !text || !usage {
 		t.Fatalf("text=%v usage=%v", text, usage)
+	}
+}
+
+func TestStreamUnsupportedProvider(t *testing.T) {
+	_, err := Stream(context.Background(), config.Model{Provider: "nope"}, "k", &http.Client{}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "unsupported provider") {
+		t.Fatalf("got %v", err)
 	}
 }

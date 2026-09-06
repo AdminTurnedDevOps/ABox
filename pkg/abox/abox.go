@@ -6,17 +6,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
-	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
+	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
+	"github.com/AdminTurnedDevOps/ABox/internal/llmbroker"
 	"github.com/AdminTurnedDevOps/ABox/internal/repository"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
 	"github.com/AdminTurnedDevOps/ABox/internal/session"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
-// ErrGuestTooOld is returned when a v2-only Turn option is used against a v1 guest.
+// ErrGuestTooOld is returned when an operation requires a protocol-2+ guest.
 var ErrGuestTooOld = runtime.ErrGuestTooOld
 
 type Options struct {
@@ -56,14 +58,21 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
-	if err := credentials.ApplyToEnv(); err != nil {
-		return nil, fmt.Errorf("credentials: %w", err)
+	n, scrubErr := session.ScrubSecretsEverywhere()
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "abox: scrubbed plaintext secrets from %d old session(s)\n", n)
 	}
+	if scrubErr != nil {
+		return nil, fmt.Errorf("scrub legacy session secrets: %w", scrubErr)
+	}
+	resolver := credsource.NewResolver()
 	sel, ok := cfg.ModelNamed(opts.Model)
 	if !ok {
+		resolver.Close()
 		return nil, fmt.Errorf("no model profile %q (config %s)", opts.Model, cfgPath)
 	}
 	if err := os.MkdirAll(config.SessionRoot(), 0o700); err != nil {
+		resolver.Close()
 		return nil, err
 	}
 
@@ -72,23 +81,27 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 	if resume {
 		loaded, err := loadResume(opts.RepoPath, resumeID)
 		if err != nil {
+			resolver.Close()
 			return nil, err
 		}
 		sess = loaded
 	} else {
 		created, err := session.Create(opts.RepoPath, "pending")
 		if err != nil {
+			resolver.Close()
 			return nil, fmt.Errorf("create session: %w", err)
 		}
 		sess = created
 		opened, err := repository.OpenForSession(opts.RepoPath, filepath.Join(sess.Dir, "host-tree"))
 		if err != nil {
+			resolver.Close()
 			return nil, fmt.Errorf("snapshot repo: %w", err)
 		}
 		snap = opened
 		sess.RepoRoot = snap.Root
 		sess.HEAD = snap.HEAD
 		if err := sess.WriteMeta(); err != nil {
+			resolver.Close()
 			return nil, err
 		}
 	}
@@ -99,9 +112,11 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 	}
 	mcpServers, err := cfg.ResolvedMCPServers()
 	if err != nil {
+		resolver.Close()
 		return nil, err
 	}
-	if err := runtime.Prepare(sess, image, sel, cfg.SecretsFromEnv(), mcpServers, resume); err != nil {
+	if err := runtime.Prepare(sess, image, sel, mcpServers, resume); err != nil {
+		resolver.Close()
 		return nil, err
 	}
 	vcpu, ram := cfg.Resources.Resolved()
@@ -123,20 +138,54 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 	}
 	sb, err := runtime.Start(bootCtx, sess, vmm, vcpu, ram)
 	if err != nil {
+		resolver.Close()
 		return nil, fmt.Errorf("start vm: %w", err)
+	}
+	if sb.GuestProtocol < 2 {
+		sb.Stop()
+		resolver.Close()
+		if resume {
+			return nil, fmt.Errorf("%w: cannot resume protocol-1 session %q after secretless config rewrite; rebuild the guest image and start a new session", ErrGuestTooOld, sess.ID)
+		}
+		return nil, fmt.Errorf("%w: protocol-1 guest cannot use the secretless config; rebuild the guest image", ErrGuestTooOld)
+	}
+	sb.OnGuestCall = llmbroker.New(cfg, resolver)
+
+	// Push whatever resolved before returning a partial-resolution error.
+	pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer pushCancel()
+	secrets, resolveErr := credsource.ResolveSelected(pushCtx, resolver, cfg, sel)
+	pushErr := sb.PushSecrets(pushCtx, sel, secrets)
+	if err := credentialStartupError(resolveErr, pushErr); err != nil {
+		sb.Stop()
+		resolver.Close()
+		return nil, err
 	}
 	if !resume {
 		archive, err := repository.ArchiveHEAD(snap.Root)
 		if err != nil {
 			sb.Stop()
+			resolver.Close()
 			return nil, fmt.Errorf("archive repo: %w", err)
 		}
 		if err := sb.TransferArchive(ctx, archive); err != nil {
 			sb.Stop()
+			resolver.Close()
 			return nil, fmt.Errorf("transfer repo: %w", err)
 		}
 	}
-	return &Session{cfg: cfg, sess: sess, sb: sb, sel: sel}, nil
+	return &Session{cfg: cfg, sess: sess, sb: sb, sel: sel, resolver: resolver}, nil
+}
+
+func credentialStartupError(resolveErr, pushErr error) error {
+	var errs []error
+	if resolveErr != nil {
+		errs = append(errs, fmt.Errorf("resolve credentials: %w", resolveErr))
+	}
+	if pushErr != nil {
+		errs = append(errs, fmt.Errorf("push resolved credentials: %w", pushErr))
+	}
+	return errors.Join(errs...)
 }
 
 func loadResume(repoPath, id string) (*session.Session, error) {
@@ -176,10 +225,12 @@ type TurnResult struct {
 }
 
 type Session struct {
-	cfg  config.File
-	sess *session.Session
-	sb   *runtime.Sandbox
-	sel  config.Model
+	mu       sync.RWMutex
+	cfg      config.File
+	sess     *session.Session
+	sb       *runtime.Sandbox
+	sel      config.Model
+	resolver *credsource.Resolver
 }
 
 func (s *Session) ID() string { return s.sess.ID }
@@ -207,6 +258,8 @@ func (s *Session) TurnOpts(ctx context.Context, prompt string, opts TurnOpts, on
 }
 
 func (s *Session) turn(ctx context.Context, prompt string, opts TurnOpts, onEvent func(Event)) (*TurnResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	rtOpts := runtime.TurnOptions{
 		MaxTurns:   opts.MaxTurns,
 		RichEvents: opts.RichEvents,
@@ -227,9 +280,7 @@ func (s *Session) turn(ctx context.Context, prompt string, opts TurnOpts, onEven
 	out, err := s.sb.UserTurnCtx(ctx, prompt, rtOpts, onEvent)
 	res := &TurnResult{}
 	if out != nil {
-		res.Usage = out.Usage
-		res.StopReason = out.StopReason
-		res.Canceled = out.Canceled
+		res = turnResult(out)
 	}
 	if err != nil && errors.Is(err, runtime.ErrGuestTooOld) {
 		return res, fmt.Errorf("%w: %v", ErrGuestTooOld, err)
@@ -237,13 +288,47 @@ func (s *Session) turn(ctx context.Context, prompt string, opts TurnOpts, onEven
 	return res, err
 }
 
+func turnResult(out *runtime.TurnOutcome) *TurnResult {
+	if out == nil {
+		return &TurnResult{}
+	}
+	return &TurnResult{Usage: out.Usage, StopReason: out.StopReason, Canceled: out.Canceled}
+}
+
 func (s *Session) SetModel(ctx context.Context, model string) error {
-	sel, ok := s.cfg.ModelNamed(model)
+	if !s.mu.TryLock() {
+		return fmt.Errorf("cannot set model while a turn or model update is in progress")
+	}
+	defer s.mu.Unlock()
+	if s.sb.GuestProtocol < 2 {
+		return fmt.Errorf("%w: set model requires protocol 2, guest speaks %d", ErrGuestTooOld, s.sb.GuestProtocol)
+	}
+	cfg, _, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("reload config: %w", err)
+	}
+	sel, ok := cfg.ModelNamed(model)
 	if !ok {
 		return fmt.Errorf("no model profile %q", model)
 	}
+	var secrets map[string]string
+	if s.sb.GuestProtocol == 2 {
+		ref := sel.CredentialReference()
+		val, err := s.resolver.Resolve(ctx, credsource.FromConfig(ref))
+		if err != nil {
+			return fmt.Errorf("credential for model %q (%s %s): %w", sel.Name, ref.Source, ref.Name, err)
+		}
+		secrets = map[string]string{sel.EnvName(): string(val.Bytes)}
+		val.Zero()
+	}
+	if err := s.sb.SetModel(ctx, sel, secrets); err != nil {
+		return err
+	}
+	// Broker snapshots config at construction; replace it after the guest accepts the model.
+	s.sb.OnGuestCall = llmbroker.New(cfg, s.resolver)
+	s.cfg = cfg
 	s.sel = sel
-	return s.sb.SetModel(ctx, sel, s.cfg.SecretsFromEnv())
+	return nil
 }
 
 func (s *Session) SetMCPTokens(ctx context.Context, secrets map[string]string) error {
@@ -278,5 +363,7 @@ func (s *Session) Close() error {
 	if s.sb == nil {
 		return nil
 	}
-	return s.sb.Stop()
+	err := s.sb.Stop()
+	s.resolver.Close()
+	return err
 }

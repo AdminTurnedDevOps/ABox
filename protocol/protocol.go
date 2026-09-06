@@ -10,12 +10,23 @@ import (
 )
 
 const (
-	Version         = 2
+	Version = 3 // host provider broker; LLM credentials stay on the host
+
 	MaxFrameBytes   = 1 << 20
 	MaxArchiveChunk = 256 << 10
 	MaxHistoryBytes = 256 << 10
 	RPCPort         = 1024
 	GuestRepoDir    = "/work/repo"
+
+	MaxProviderChunk    = 256 << 10 // provider_send chunk size
+	MaxProviderRequest  = 4 << 20   // reassembled provider_send budget
+	MaxProviderToolArgs = 512 << 10 // per tool-args bound; larger -> error event
+	MaxProviderEvent    = 512 << 10 // encoded provider_event params budget
+	MaxProviderMessages = 4096      // messages in one provider request
+	MaxProviderTools    = 256       // tool schemas in one provider request
+	MaxProviderEvents   = 1 << 20   // events in one provider stream
+	MaxProviderStreams  = 2         // concurrent provider streams per session
+	MaxGuestCalls       = 8         // concurrent guest-initiated host RPCs
 )
 
 // Frame is a length-prefixed JSON message.
@@ -77,6 +88,7 @@ type GetContextResult struct {
 type HelloResult struct {
 	Accepted bool   `json:"accepted"`
 	Message  string `json:"message,omitempty"`
+	Protocol int    `json:"protocol,omitempty"` // 0 if omitted; old hosts hang without this
 }
 
 type ListFilesParams struct {
@@ -165,7 +177,7 @@ type GuestConfig struct {
 	VsockPort  uint32            `json:"vsock_port"`
 	RepoDir    string            `json:"repo_dir"`
 	Model      GuestModel        `json:"model"`
-	Secrets    map[string]string `json:"secrets,omitempty"`
+	Secrets    map[string]string `json:"secrets,omitempty"` // deprecated; kept so old images still parse
 	MCPServers []GuestMCPServer  `json:"mcp_servers,omitempty"`
 }
 
@@ -204,6 +216,58 @@ type SetMCPTokensParams struct {
 	Secrets map[string]string `json:"secrets"`
 }
 
+// Model is a configured alias, never a URL, header, or credential name.
+type ProviderOpenParams struct {
+	Model string `json:"model"`
+	Rich  bool   `json:"rich,omitempty"`
+}
+
+type ProviderOpenResult struct {
+	StreamID string `json:"stream_id"`
+}
+
+type ProviderSendParams struct {
+	StreamID string `json:"stream_id"`
+	Data     []byte `json:"data"`
+	Last     bool   `json:"last,omitempty"` // host starts the provider call after Last
+}
+
+type ProviderRequest struct {
+	Messages []ProviderMessage    `json:"messages"`
+	Tools    []ProviderToolSchema `json:"tools,omitempty"`
+}
+
+type ProviderCancelParams struct {
+	StreamID string `json:"stream_id"`
+}
+
+type ProviderEventParams struct {
+	StreamID   string     `json:"stream_id"`
+	Type       string     `json:"type"`
+	Text       string     `json:"text,omitempty"`
+	ToolID     string     `json:"tool_id,omitempty"`
+	ToolName   string     `json:"tool_name,omitempty"`
+	ToolArgs   string     `json:"tool_args,omitempty"`
+	Usage      *UsageInfo `json:"usage,omitempty"`
+	StopReason string     `json:"stop_reason,omitempty"`
+	Err        string     `json:"err,omitempty"`
+}
+
+type ProviderMessage struct {
+	Role       string `json:"role"`
+	Content    string `json:"content,omitempty"`
+	ToolID     string `json:"tool_id,omitempty"`
+	ToolName   string `json:"tool_name,omitempty"`
+	ToolArgs   string `json:"tool_args,omitempty"`
+	ToolResult string `json:"tool_result,omitempty"`
+}
+
+type ProviderToolSchema struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
 func WriteFrame(w io.Writer, f Frame) error {
 	if f.V == 0 {
 		f.V = Version
@@ -217,11 +281,26 @@ func WriteFrame(w io.Writer, f Frame) error {
 	}
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
-	if _, err := w.Write(hdr[:]); err != nil {
+	if err := writeFull(w, hdr[:]); err != nil {
 		return err
 	}
-	_, err = w.Write(body)
-	return err
+	return writeFull(w, body)
+}
+
+func writeFull(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if n > 0 {
+			p = p[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 func ReadFrame(r io.Reader) (Frame, error) {
@@ -250,21 +329,25 @@ func ReadFrameLimit(r io.Reader, limit int) (Frame, error) {
 
 // TrimHistory keeps the newest lines whose JSON size fits in maxBytes.
 func TrimHistory(h []HistoryLine, maxBytes int) []HistoryLine {
-	if maxBytes <= 0 {
+	if maxBytes < 2 {
 		return nil
 	}
-	var out []HistoryLine
-	var size int
+	out := make([]HistoryLine, 0)
+	size := 2 // JSON array brackets.
 	for i := len(h) - 1; i >= 0; i-- {
 		b, err := json.Marshal(h[i])
 		if err != nil {
 			continue
 		}
-		if size+len(b) > maxBytes && len(out) > 0 {
-			break
+		itemSize := len(b)
+		if len(out) > 0 {
+			itemSize++ // Comma separator.
+		}
+		if size+itemSize > maxBytes {
+			continue
 		}
 		out = append(out, h[i])
-		size += len(b)
+		size += itemSize
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]

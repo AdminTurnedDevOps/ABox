@@ -10,13 +10,13 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 )
 
-func TestWriteGuestConfigIncludesMCP(t *testing.T) {
+func TestWriteGuestConfigIncludesMCPNoSecrets(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, err := Create("/repo", "deadbeef")
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.WriteGuestConfig(config.Model{Name: "grok"}, map[string]string{"ABOX_MCP_GH_TOKEN": "tok"}, []config.MCPServer{
+	err = s.WriteGuestConfig(config.Model{Name: "grok"}, []config.MCPServer{
 		{Name: "gh", URL: "https://api.githubcopilot.com/mcp/", CredentialEnv: "ABOX_MCP_GH_TOKEN"},
 	})
 	if err != nil {
@@ -29,6 +29,48 @@ func TestWriteGuestConfigIncludesMCP(t *testing.T) {
 	body := string(data)
 	if !strings.Contains(body, "api.githubcopilot.com") || !strings.Contains(body, "ABOX_MCP_GH_TOKEN") {
 		t.Fatalf("guest config missing mcp: %s", body)
+	}
+	if strings.Contains(body, `"secrets"`) {
+		t.Fatalf("guest config leaked a secrets key: %s", body)
+	}
+	st, err := os.Stat(s.GuestConfigJSON())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("perm %o", st.Mode().Perm())
+	}
+}
+
+func TestWritePaddedConfigLayout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.raw")
+	data := []byte(`{"session_id":"x"}`)
+	if err := WritePaddedConfig(path, data); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != ConfigDiskSize {
+		t.Fatalf("size %d", len(raw))
+	}
+	if string(raw[:len(data)]) != string(data) {
+		t.Fatalf("payload %q", raw[:len(data)])
+	}
+	if raw[len(data)] != 0 {
+		t.Fatal("missing zero padding")
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o400 {
+		t.Fatalf("perm %o", st.Mode().Perm())
+	}
+	// Rewriting a read-only file must still work (resume path).
+	if err := WritePaddedConfig(path, []byte(`{"session_id":"y"}`)); err != nil {
+		t.Fatal(err)
 	}
 }
 

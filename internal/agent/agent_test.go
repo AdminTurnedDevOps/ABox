@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
 	"github.com/AdminTurnedDevOps/ABox/internal/provider"
+	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
 func TestMaxTurnsStops(t *testing.T) {
@@ -194,5 +196,82 @@ func TestAllToolsIncludesMCP(t *testing.T) {
 	}
 	if tools[5].Name != "svc__echo" {
 		t.Fatalf("got %q", tools[5].Name)
+	}
+}
+
+// fakeStream returns a canned event stream; used to exercise Turn without HTTP.
+type fakeStream struct {
+	calls  int
+	events []provider.Event
+}
+
+func (f *fakeStream) stream(_ context.Context, _ config.Model, _ []provider.Message, _ []provider.ToolSchema) (<-chan provider.Event, error) {
+	f.calls++
+	out := make(chan provider.Event, len(f.events))
+	for _, ev := range f.events {
+		out <- ev
+	}
+	close(out)
+	return out, nil
+}
+
+func TestTurnUsesInjectedStream(t *testing.T) {
+	fs := &fakeStream{events: []provider.Event{
+		{Type: "text", Text: "hello"},
+		{Type: "done"},
+	}}
+	l := &Loop{
+		Repo:   tools.Repo{Root: t.TempDir()},
+		Stream: fs.stream,
+	}
+	var got []string
+	l.OnEvent = func(ev protocol.AgentEvent) { got = append(got, ev.Kind) }
+	if err := l.Turn(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.calls != 1 {
+		t.Fatalf("stream calls %d", fs.calls)
+	}
+	if len(l.Messages) != 2 || l.Messages[1].Content != "hello" {
+		t.Fatalf("messages %+v", l.Messages)
+	}
+	if len(got) < 2 {
+		t.Fatalf("events %v", got)
+	}
+}
+
+func TestTurnEmitsRichUsageResult(t *testing.T) {
+	fs := &fakeStream{events: []provider.Event{
+		{Type: "text", Text: "hello"},
+		{Type: "usage", Usage: &protocol.UsageInfo{InputTokens: 7, OutputTokens: 3}, StopReason: "end_turn"},
+		{Type: "done"},
+	}}
+	l := &Loop{
+		Repo:   tools.Repo{Root: t.TempDir()},
+		Rich:   true,
+		Stream: fs.stream,
+	}
+	var result protocol.AgentEvent
+	l.OnEvent = func(ev protocol.AgentEvent) {
+		if ev.Kind == "result" {
+			result = ev
+		}
+	}
+	if err := l.Turn(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 3 {
+		t.Fatalf("result usage %+v", result.Usage)
+	}
+	if result.StopReason != "end_turn" {
+		t.Fatalf("stop reason %q", result.StopReason)
+	}
+}
+
+func TestTurnWithoutStreamErrors(t *testing.T) {
+	l := &Loop{Repo: tools.Repo{Root: t.TempDir()}}
+	err := l.Turn(context.Background(), "hi")
+	if err == nil || !strings.Contains(err.Error(), "stream function") {
+		t.Fatalf("got %v", err)
 	}
 }

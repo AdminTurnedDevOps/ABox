@@ -1,4 +1,4 @@
-// Package egress allows the guest agent to reach only configured LLM APIs.
+// Package egress allowlists guest outbound hosts.
 package egress
 
 import (
@@ -13,11 +13,8 @@ import (
 	"time"
 )
 
-var defaultAllowed = map[string]struct{}{
-	"api.x.ai":          {},
-	"api.openai.com":    {},
-	"api.anthropic.com": {},
-}
+// Empty: protocol-3 guests only allow MCP origins added at boot.
+var defaultAllowed = map[string]struct{}{}
 
 var (
 	allowedMu    sync.Mutex

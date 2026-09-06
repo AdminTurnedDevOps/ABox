@@ -64,6 +64,28 @@ func Save(envName, value string) error {
 		return err
 	}
 	cur[envName] = value
+	return writeAll(cur)
+}
+
+func Delete(envName string) error {
+	if envName == "" {
+		return fmt.Errorf("empty credential name")
+	}
+	if !config.ValidEnvName(envName) {
+		return fmt.Errorf("invalid credential name %q", envName)
+	}
+	cur, err := Load()
+	if err != nil {
+		return err
+	}
+	if _, ok := cur[envName]; !ok {
+		return nil
+	}
+	delete(cur, envName)
+	return writeAll(cur)
+}
+
+func writeAll(cur map[string]string) error {
 	if err := os.MkdirAll(config.AppSupportDir(), 0o700); err != nil {
 		return err
 	}

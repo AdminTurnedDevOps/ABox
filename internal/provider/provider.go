@@ -8,15 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
+	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
-	"github.com/AdminTurnedDevOps/ABox/internal/guest/egress"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
-
-var newHTTPClient = func() *http.Client { return egress.Client() }
 
 type Event struct {
 	Type       string
@@ -44,56 +41,41 @@ type ToolSchema struct {
 	Parameters  map[string]any
 }
 
-func Stream(ctx context.Context, model config.Model, messages []Message, tools []ToolSchema) (<-chan Event, error) {
-	key := strings.TrimSpace(os.Getenv(model.CredentialEnv))
-	if key == "" {
-		return nil, fmt.Errorf("missing credential %s", model.CredentialEnv)
-	}
-	base := strings.TrimRight(model.BaseURL, "/")
-	if base == "" {
-		switch model.Provider {
-		case "xai":
-			base = "https://api.x.ai/v1"
-		case "openai":
-			base = "https://api.openai.com/v1"
-		case "anthropic":
-			return streamAnthropic(ctx, model, key, messages, tools)
-		default:
-			return nil, fmt.Errorf("unsupported provider %q", model.Provider)
-		}
-	}
-	if model.Provider == "anthropic" {
-		return streamAnthropic(ctx, model, key, messages, tools)
-	}
-	return streamOpenAICompat(ctx, base, key, model.Model, messages, tools, false)
+// Stream never reads the environment or builds its own client.
+func Stream(ctx context.Context, model config.Model, key string, client *http.Client, messages []Message, tools []ToolSchema) (<-chan Event, error) {
+	return stream(ctx, model, key, client, messages, tools, false)
 }
 
-func StreamWithUsage(ctx context.Context, model config.Model, messages []Message, tools []ToolSchema) (<-chan Event, error) {
-	key := strings.TrimSpace(os.Getenv(model.CredentialEnv))
-	if key == "" {
-		return nil, fmt.Errorf("missing credential %s", model.CredentialEnv)
-	}
-	base := strings.TrimRight(model.BaseURL, "/")
-	if base == "" {
-		switch model.Provider {
-		case "xai":
-			base = "https://api.x.ai/v1"
-		case "openai":
-			base = "https://api.openai.com/v1"
-		case "anthropic":
-			return streamAnthropic(ctx, model, key, messages, tools)
-		default:
-			return nil, fmt.Errorf("unsupported provider %q", model.Provider)
-		}
-	}
-	if model.Provider == "anthropic" {
-		return streamAnthropic(ctx, model, key, messages, tools)
-	}
+func StreamWithUsage(ctx context.Context, model config.Model, key string, client *http.Client, messages []Message, tools []ToolSchema) (<-chan Event, error) {
 	includeUsage := model.Provider != "xai"
-	return streamOpenAICompat(ctx, base, key, model.Model, messages, tools, includeUsage)
+	return stream(ctx, model, key, client, messages, tools, includeUsage)
 }
 
-func streamOpenAICompat(ctx context.Context, base, key, model string, messages []Message, tools []ToolSchema, includeUsage bool) (<-chan Event, error) {
+func stream(ctx context.Context, model config.Model, key string, client *http.Client, messages []Message, tools []ToolSchema, includeUsage bool) (<-chan Event, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, fmt.Errorf("missing credential %s", model.CredentialEnv)
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Minute}
+	}
+	if model.Provider == "anthropic" {
+		return streamAnthropic(ctx, model, key, client, messages, tools)
+	}
+	base := strings.TrimRight(model.BaseURL, "/")
+	if base == "" {
+		switch model.Provider {
+		case "xai":
+			base = "https://api.x.ai/v1"
+		case "openai":
+			base = "https://api.openai.com/v1"
+		default:
+			return nil, fmt.Errorf("unsupported provider %q", model.Provider)
+		}
+	}
+	return streamOpenAICompat(ctx, base, key, model.Model, client, messages, tools, includeUsage)
+}
+
+func streamOpenAICompat(ctx context.Context, base, key, model string, client *http.Client, messages []Message, tools []ToolSchema, includeUsage bool) (<-chan Event, error) {
 	var oaiMsgs []map[string]any
 	for _, m := range messages {
 		switch {
@@ -152,7 +134,7 @@ func streamOpenAICompat(ctx context.Context, base, key, model string, messages [
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := newHTTPClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +211,7 @@ func streamOpenAICompat(ctx context.Context, base, key, model string, messages [
 	return out, nil
 }
 
-func streamAnthropic(ctx context.Context, model config.Model, key string, messages []Message, tools []ToolSchema) (<-chan Event, error) {
+func streamAnthropic(ctx context.Context, model config.Model, key string, client *http.Client, messages []Message, tools []ToolSchema) (<-chan Event, error) {
 	base := strings.TrimRight(model.BaseURL, "/")
 	if base == "" {
 		base = "https://api.anthropic.com"
@@ -298,7 +280,7 @@ func streamAnthropic(ctx context.Context, model config.Model, key string, messag
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := newHTTPClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

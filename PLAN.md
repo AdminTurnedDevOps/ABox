@@ -50,8 +50,8 @@ The current plan makes these decisions:
 | Initial guest | ARM64 Linux |
 | Initial microVM backend | libkrun over Apple Hypervisor.framework |
 | Runtime integration | Dedicated `abox-vmm` Go helper with a narrow cgo boundary |
-| Guest network | No NIC and no libkrun TSI in milestone one |
-| Model traffic | Guest agent calls providers; TSI inet for HTTPS only |
+| Guest network | No guest NIC. TSI inet for allowlisted MCP HTTPS only |
+| Model traffic | Host provider broker. TSI inet is MCP-only |
 | Providers | OpenAI, Anthropic, and Grok through xAI |
 | Repository state | Clean Git worktree only |
 | Host workspace sharing | Prohibited |
@@ -60,7 +60,7 @@ The current plan makes these decisions:
 | TUI framework | Bubble Tea v2, Bubbles, and Lip Gloss v2 |
 | TUI style | Full-screen near-black interface with restrained status colors |
 | agentgateway | Optional adapter; never required for basic operation |
-| Connectivity broker | Host-owned, typed, endpoint-bound package and MCP broker |
+| Connectivity broker | LLM broker is in. Package/MCP broker remains Planned |
 | Package-manager compatibility | Origin rewrite to a guest loopback adapter, not HTTP(S) proxy |
 | Instruction loading | Supervisor reads the captured host snapshot and host configuration |
 | Repo instruction authority | Repo text cannot change policy, limits, connectivity, or tools |
@@ -182,9 +182,11 @@ The host-side `abox` process owns:
 - Audit records
 - Patch review and confirmed import
 
-Provider credentials may be entered on the host (`/provider`) and are
-copied into the guest agent so the model client runs inside the
-microVM. The host must not run the agent loop or call provider APIs.
+Provider credentials are entered on the host (`/provider`) and resolved
+from env, macOS keychain, Vault, Azure Key Vault, or AWS Secrets Manager.
+They are never written to session dirs or the guest disk. The host broker
+calls the provider API; the host must not run the agent loop. MCP tokens
+still enter the guest.
 
 The host supervisor must remain small. It must not contain an arbitrary shell
 execution path, generated-code runner, or generic guest-to-host file service.
@@ -220,8 +222,8 @@ The `abox-guest` worker and everything it starts are untrusted. The design
 assumes the guest can become fully compromised, including guest root and the
 guest kernel.
 
-The guest owns the agent: the prompt, the model client, tools, and
-everything the model starts.
+The guest owns the agent: the prompt, tools, and everything the model
+starts. Provider HTTPS is host-brokered.
 
 The guest owns all effectful tools:
 
@@ -237,7 +239,8 @@ The guest owns all effectful tools:
 - Applications started by the agent
 
 The guest receives no model-provider credentials, host home-directory access,
-cloud credentials, SSH keys, Docker socket, or read-write host mount.
+cloud credentials, SSH keys, Docker socket, or read-write host mount. MCP
+tokens still enter the guest.
 
 ### 4.4 External Services
 
@@ -682,9 +685,10 @@ Host may call:
 
 Guest may call only:
 
-- `FetchPackage`
-- MCP stream methods defined in section 14.4
+- `provider_open`, `provider_send`, `provider_cancel` (host LLM broker)
 - Readiness and bounded log or status notifications
+
+`FetchPackage` and MCP stream methods (section 14.4) remain Planned.
 
 The guest must not invoke host tool, import, shell, or arbitrary-fetch
 methods. Phase 3 tests both directions.
@@ -820,14 +824,14 @@ defense in depth but is not the primary boundary.
 
 ## 12. Agent Loop
 
-The host supervisor owns the model interaction loop:
+The guest owns the model interaction loop. The host broker performs provider HTTPS:
 
 1. Receive the user's prompt from the TUI or `abox exec`.
 2. Build the model request using configured instructions, the five ABox
    tool schemas, and any approved discovered MCP tool schemas.
-3. Stream model output into normalized host events.
+3. Send the request through the host provider broker and stream events back.
 4. When the model requests a tool, validate the tool name and arguments.
-5. Send a typed tool request to `abox-guest` over RPC.
+5. Run the tool in the guest.
 6. Stream or collect the bounded guest result.
 7. Display activity and result status in the TUI.
 8. Return the result to the same provider conversation.
@@ -1011,11 +1015,11 @@ blocks while preserving the assistant content needed for subsequent turns.
 
 ### 13.4 Credentials
 
-- Credentials remain only in host memory.
-- Credentials are resolved by the host credential source from environment
-  variables or the operating system credential store.
-- Credentials are never written to session logs.
-- Credentials are never copied into the guest.
+- LLM credentials remain only in host memory.
+- Sources: env, macOS keychain, Vault KV v2, Azure Key Vault, AWS Secrets Manager.
+- Credentials are never written to session logs or `config.raw`.
+- LLM credentials are never copied into the guest.
+- MCP tokens still enter the guest until section 14.4.
 - Configuration stores credential references, not secret values.
 
 The credential source is distinct from the connectivity broker. It resolves
@@ -1062,14 +1066,15 @@ Connectivity is independent from the guest runtime isolation profile.
 
 - The trusted host supervisor may contact explicitly configured model-provider
   endpoints.
-- The connectivity broker may contact exact configured remote MCP endpoints on
-  behalf of the guest MCP client.
-- The connectivity broker may fetch from exact configured package indexes on
-  behalf of guest package tooling.
-- The guest remains without a NIC and without TSI.
+- The guest MCP client may contact configured MCP endpoints over TSI inet.
+- Package-index fetch remains Planned (section 14.4).
+- The guest remains without a NIC.
 - Direct mode does not imply unrestricted guest egress.
 
 ### 14.3 `agentgateway`
+
+The LLM gateway adapter is Planned. Today `agentgateway` mode applies to MCP
+endpoints; the host broker dials each model's `base_url`.
 
 - ABox is a standalone client of a pre-existing agentgateway endpoint.
 - ABox does not install a local gateway, Kubernetes CRDs, Helm charts, or an
@@ -1117,8 +1122,9 @@ enforced.
 
 ### 14.4 Connectivity Broker Contract
 
-The first milestone includes a typed, allowlisted host broker for configured
-package indexes and remote MCP servers. The broker is implemented by
+This section is Planned for MCP and package indexes. The LLM provider broker
+is already in. The first milestone includes a typed, allowlisted host broker
+for configured package indexes and remote MCP servers. The broker is implemented by
 `internal/connectivity` inside the trusted supervisor and does not run as a
 separate daemon.
 
@@ -1185,7 +1191,7 @@ The contract enforces:
   bounded and cancellable.
 - The broker is not a TCP, CONNECT, SOCKS, DNS, or general HTTP forwarder.
 - Provider, gateway, package-index, MCP, and host credentials remain on the
-  host and are never returned to the guest.
+  host and are never returned to the guest. MCP tokens are the current exception.
 - In offline mode, all remote broker methods are refused.
 - With required agentgateway enforcement, the broker may open only the
   configured agentgateway endpoint and never a direct backend or package-index

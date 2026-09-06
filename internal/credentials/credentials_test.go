@@ -52,3 +52,46 @@ func TestSavePreservesMCPTokens(t *testing.T) {
 		t.Fatalf("llm key: %#v", got)
 	}
 }
+
+func TestDeleteRemovesOneKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := Save("XAI_API_KEY", "keep-me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save("ABOX_MCP_GITHUB_TOKEN", "drop-me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete("ABOX_MCP_GITHUB_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["XAI_API_KEY"] != "keep-me" {
+		t.Fatalf("kept %#v", got)
+	}
+	if _, ok := got["ABOX_MCP_GITHUB_TOKEN"]; ok {
+		t.Fatalf("deleted key still present: %#v", got)
+	}
+}
+
+func TestDeleteMissingIsNoop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := Delete("XAI_API_KEY"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save("XAI_API_KEY", "keep-me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete("OPENAI_API_KEY"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["XAI_API_KEY"] != "keep-me" {
+		t.Fatalf("got %#v", got)
+	}
+}
