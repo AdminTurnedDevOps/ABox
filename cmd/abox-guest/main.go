@@ -1,5 +1,7 @@
 //go:build linux
 
+// To configure the microVM. It is the daemon/workload inside of the VM. Its the long-running application inside the VM
+
 package main
 
 import (

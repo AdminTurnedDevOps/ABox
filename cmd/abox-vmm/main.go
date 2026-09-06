@@ -1,3 +1,5 @@
+// Reads configuration and calls libkrun to create/start the VM
+
 package main
 
 import (
