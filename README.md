@@ -281,6 +281,16 @@ LLM traffic does **not** take the MCP `connectivity.mode` path. Direct vs agentg
 
 ## Credentials
 
+The following credential providers are supported (where your LLM API key lives):
+
+| Source | `name` is | Auth |
+| --- | --- | --- |
+| `env` | environment variable (also reads `~/.abox/credentials.env`) | — |
+| `keychain` | macOS keychain account (service `abox`) | — |
+| `vault` | Vault KV v2 path (`secret/abox/anthropic`) | `VAULT_ADDR` + `VAULT_TOKEN` (or `~/.vault-token`) |
+| `azure` | Key Vault secret URI (`https://myvault.vault.azure.net/secrets/name`) | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, or `az login` |
+| `aws` | Secrets Manager secret id | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`AWS_REGION`) |
+
 Config lives at `~/.abox/config.yaml`. Keys are **not** stored in that file. Each model or MCP server points at a source:
 
 ```yaml
@@ -290,14 +300,6 @@ credential:
   # field: value              # vault/aws only
   # version: "4"              # vault/azure only
 ```
-
-| Source | `name` is | Auth |
-| --- | --- | --- |
-| `env` | environment variable (also reads `~/.abox/credentials.env`) | — |
-| `keychain` | macOS keychain account (service `abox`) | — |
-| `vault` | Vault KV v2 path (`secret/abox/anthropic`) | `VAULT_ADDR` + `VAULT_TOKEN` (or `~/.vault-token`) |
-| `azure` | Key Vault secret URI (`https://myvault.vault.azure.net/secrets/name`) | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, or `az login` |
-| `aws` | Secrets Manager secret id | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`AWS_REGION`) |
 
 `credential_env: XAI_API_KEY` is the same as `{source: env, name: XAI_API_KEY}`.
 
