@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -27,8 +28,11 @@ func TestApprovalDefaultsToDenyAndShowsExactRequest(t *testing.T) {
 		t.Fatalf("mode=%v allow=%v", m.mode, m.approvalAllow)
 	}
 	view := m.View().Content
-	for _, want := range []string{strconv.Quote(command), `guest workdir: "src/path with space"`, "timeout: 37s", "[Deny]"} {
-		if !strings.Contains(view, want) {
+	// The dialog wraps to the panel width, so compare against a flattened
+	// rendering: the exact quoted request must still be recoverable.
+	flat := flattenApproval(view)
+	for _, want := range []string{strconv.Quote(command), strconv.Quote("src/path with space"), "37s", "[Deny]"} {
+		if !strings.Contains(flat, flattenApproval(want)) {
 			t.Fatalf("approval view missing %q:\n%s", want, view)
 		}
 	}
@@ -151,4 +155,19 @@ func approvalRequest(ctx context.Context, params protocol.RunCommandApprovalPara
 		response: make(chan protocol.ApprovalDecision, 1),
 		settled:  make(chan struct{}),
 	}
+}
+
+var ansiPattern = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// flattenApproval strips styling, panel chrome, and layout whitespace so an
+// assertion can read the dialog's content across wrapped lines.
+func flattenApproval(view string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\u250f', '\u2513', '\u2517', '\u251b', '\u2503', '\u2502', '\u2501', '\u2500',
+			'\u2521', '\u2529', '\u2514', '\u2518', ' ', '\n', '\t':
+			return -1
+		}
+		return r
+	}, ansiPattern.ReplaceAllString(view, ""))
 }

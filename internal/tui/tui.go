@@ -3,15 +3,14 @@ package tui
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
@@ -66,6 +65,7 @@ type model struct {
 	approvalReq    *runCommandApprovalRequest
 	approvalAllow  bool
 	approvals      chan *runCommandApprovalRequest
+	spin           spinner.Model
 }
 
 type evMsg protocol.AgentEvent
@@ -95,6 +95,13 @@ func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, broker *hostbro
 	ta.Focus()
 	ta.SetHeight(3)
 	ta.ShowLineNumbers = false
+	// Mark only the first line, so continuation rows read as one input field.
+	ta.SetPromptFunc(2, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return "› "
+		}
+		return "  "
+	})
 	ta.KeyMap.InsertNewline = key.NewBinding(
 		key.WithKeys("shift+enter", "alt+enter"),
 		key.WithHelp("shift+enter", "newline"),
@@ -104,8 +111,9 @@ func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, broker *hostbro
 	ki.EchoCharacter = '•'
 	ki.Placeholder = "paste API key"
 	ki.Prompt = "key> "
+	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	return model{
-		cfg: cfg, sel: sel, sandbox: sb, hostBroker: broker, ta: ta, keyIn: ki,
+		cfg: cfg, sel: sel, sandbox: sb, hostBroker: broker, ta: ta, keyIn: ki, spin: sp,
 		vmState: vmState, log: log, transcriptPath: transcriptPath,
 		approvals: make(chan *runCommandApprovalRequest),
 	}
@@ -152,6 +160,13 @@ func credStatusLabel(ctx context.Context, r *credsource.Resolver, ref config.Cre
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		if !m.busy {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		return m, cmd
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ta.SetWidth(max(20, m.width-4))
@@ -439,7 +454,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		})
 		close(ch)
 	}()
-	return m, waitEvent(ch)
+	return m, tea.Batch(waitEvent(ch), m.spin.Tick)
 }
 
 func (m model) runSlash(text string) (tea.Model, tea.Cmd) {
@@ -781,146 +796,158 @@ func (m *model) appendLast(s string) {
 	m.log[len(m.log)-1] = last + s
 }
 
+// headerHeight is the rail: top rule, two field rows, and the body seam.
+const headerHeight = 4
+
+func (m model) theme() theme { return newTheme(colorEnabled()) }
+
+func (m model) credState() string {
+	if m.selKeyStatus == "" {
+		return "checking"
+	}
+	return m.selKeyStatus
+}
+
 func (m model) View() tea.View {
-	canvas := lipgloss.NewStyle().Foreground(lipgloss.Color("#F4F4F5")).Background(lipgloss.Color("#050505"))
-	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#71717A"))
-	bar := lipgloss.NewStyle().Foreground(lipgloss.Color("#F4F4F5")).Background(lipgloss.Color("#141416")).Padding(0, 1)
-
-	cred := m.selKeyStatus
-	if cred == "" {
-		cred = "…"
+	th := m.theme()
+	width, height := m.width, m.height
+	if width <= 0 {
+		width = 80
 	}
-	header := bar.Render(fmt.Sprintf("ABox  %s/%s  vm:%s  net:%s  %s", m.sel.Provider, m.sel.Model, m.vmState, m.cfg.Connectivity.Mode, cred))
-
-	wrapW := m.width
-	if wrapW <= 0 {
-		wrapW = 80
-	}
-	bodyH := max(3, m.height-8)
-	if m.height == 0 {
-		bodyH = 16
-	}
-	wrapped := wrapLog(m.log, wrapW)
-	body := strings.Join(tail(wrapped, bodyH), "\n")
-	if body == "" {
-		body = muted.Render("Type / for commands.")
+	if height <= 0 {
+		height = 24
 	}
 
-	composer := m.ta.View()
-	extra := ""
-	footer := ""
-	switch m.mode {
-	case modeProviderPick:
-		var b strings.Builder
-		b.WriteString("Select provider\n")
-		for i, p := range providerChoices() {
-			mark := "  "
-			if i == m.provSel {
-				mark = "> "
-			}
-			status := "…"
-			if s, ok := m.provKeyStatus[p.Name]; ok {
-				status = s
-			}
-			b.WriteString(mark + p.Label + "  " + status + "\n")
-		}
-		composer = b.String()
-	case modeProviderKey:
-		composer = "API key for " + m.provPick.Label + "\n" + m.keyIn.View()
-	case modeCredSourcePick:
-		var b strings.Builder
-		b.WriteString("Credential store  (reference only; tokens stay in the environment)\n")
-		for i, s := range cloudCredentialChoices() {
-			mark := "  "
-			if i == m.credSourceSel {
-				mark = "> "
-			}
-			b.WriteString(mark + s.Label + "\n")
-		}
-		composer = b.String()
-	case modeCredModelPick:
-		var b strings.Builder
-		b.WriteString("Model for " + m.credSource.Label + "\n")
-		for i, p := range providerChoices() {
-			mark := "  "
-			if i == m.provSel {
-				mark = "> "
-			}
-			b.WriteString(mark + p.Label + "\n")
-		}
-		composer = b.String()
-	case modeCredName:
-		composer = m.credSource.Label + " for " + m.provPick.Label + "\n" + m.keyIn.View()
-	case modeMCPPick:
-		servers := mcpServers(m.cfg)
-		var b strings.Builder
-		b.WriteString("MCP servers  (OAuth: abox mcp login <name>)\n")
-		if len(servers) == 0 {
-			b.WriteString("  none configured\n")
-		}
-		for i, s := range servers {
-			mark := "  "
-			if i == m.mcpSel {
-				mark = "> "
-			}
-			status := "…"
-			if st, ok := m.mcpKeyStatus[s.Name]; ok {
-				if st == "key ok" {
-					status = "token ok"
-				} else {
-					status = "no token"
-				}
-			}
-			b.WriteString(mark + s.Name + "  " + s.URL + "  " + status + "\n")
-		}
-		composer = b.String()
-	case modeMCPKey:
-		composer = "Bearer token for " + m.mcpPick.Name + "\n" + m.keyIn.View()
-	case modeApproval:
-		if m.approvalReq != nil {
-			workdir := m.approvalReq.params.WorkDir
-			if workdir == "" {
-				workdir = "."
-			}
-			deny, allow := "[Deny]", " Allow once "
-			if m.approvalAllow {
-				deny, allow = " Deny ", "[Allow once]"
-			}
-			composer = fmt.Sprintf(
-				"Approve run_command?\ncommand: %s\nguest workdir: %s\ntimeout: %ds\n\n%s  %s\nleft/right or j/k select; enter confirms; esc denies",
-				strconv.Quote(m.approvalReq.params.Command), strconv.Quote(workdir), m.approvalReq.params.TimeoutSec, deny, allow,
-			)
-		}
-	default:
-		if m.showingSlash() {
-			var b strings.Builder
-			cmds := filterSlash(m.ta.Value())
-			for i, c := range cmds {
-				mark := "  "
-				if i == m.slashSel {
-					mark = "> "
-				}
-				b.WriteString(mark + c.Name + "  " + c.Help + "\n")
-			}
-			if b.Len() == 0 {
-				b.WriteString("  no matching commands\n")
-			}
-			extra = b.String()
-		}
-	}
-	if m.err != "" {
-		footer = lipgloss.NewStyle().Foreground(lipgloss.Color("#B54A4A")).Render(m.err)
+	header := renderHeader(th, headerData{
+		model: m.sel.Provider + "/" + m.sel.Model,
+		vm:    m.vmState,
+		net:   m.cfg.Connectivity.Mode,
+		key:   m.credState(),
+	}, width)
+
+	lower := m.renderLower(th, width)
+	bodyH := height - headerHeight - len(strings.Split(lower, "\n")) - 2
+	if bodyH < 3 {
+		bodyH = 3
 	}
 
-	parts := []string{header, "", body, "", extra + composer}
-	if footer != "" {
-		parts = append(parts, footer)
-	}
-	content := canvas.Render(strings.Join(parts, "\n"))
+	content := th.canvas().Render(strings.Join([]string{
+		header,
+		m.renderBody(th, width, bodyH),
+		lower,
+		renderFooter(th, m.mode, width),
+	}, "\n"))
+
 	v := tea.NewView(content)
 	v.AltScreen = true
-	v.BackgroundColor = lipgloss.Color("#050505")
+	if th.colored {
+		v.BackgroundColor = th.ground
+	}
 	return v
+}
+
+// renderBody boxes the transcript directly beneath the header seam.
+func (m model) renderBody(th theme, width, height int) string {
+	inner := width - 4
+	entries := entriesFromLog(m.log)
+	if len(entries) == 0 {
+		entries = []entry{{kind: entryNotice, text: "Type / for commands."}}
+	}
+	lines := strings.Split(renderTranscript(th, entries, inner, height), "\n")
+	if act := renderActivity(th, activityVisible(entries, m.busy), m.spin.View()); act != "" {
+		lines = tail(append(lines, act), height)
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	rule := th.style(th.line)
+	out := make([]string, 0, height+1)
+	for _, l := range lines {
+		out = append(out, rule.Render("│ ")+padTo(l, inner)+rule.Render(" │"))
+	}
+	return strings.Join(append(out, rule.Render("└"+strings.Repeat("─", width-2)+"┘")), "\n")
+}
+
+// renderLower is the mode-dependent zone under the transcript: a menu, a
+// prompt, the approval dialog, or the composer.
+func (m model) renderLower(th theme, width int) string {
+	switch m.mode {
+	case modeApproval:
+		if m.approvalReq != nil {
+			return renderApproval(th, m.approvalReq.params, m.approvalAllow, width)
+		}
+	case modeProviderPick:
+		return renderPicker(th, "Select provider", providerRows(m.provKeyStatus), m.provSel, width)
+	case modeCredModelPick:
+		return renderPicker(th, "Model for "+m.credSource.Label, providerRows(nil), m.provSel, width)
+	case modeCredSourcePick:
+		rows := make([]pickerRow, 0, 3)
+		for _, c := range cloudCredentialChoices() {
+			rows = append(rows, pickerRow{label: c.Label, detail: c.Note})
+		}
+		return renderPicker(th, "Credential store", rows, m.credSourceSel, width)
+	case modeMCPPick:
+		servers := mcpServers(m.cfg)
+		rows := make([]pickerRow, 0, len(servers))
+		for _, s := range servers {
+			rows = append(rows, pickerRow{label: s.Name, detail: s.URL, status: mcpTokenState(m.mcpKeyStatus, s.Name)})
+		}
+		return renderPicker(th, "MCP servers", rows, m.mcpSel, width)
+	case modeProviderKey:
+		return m.renderPrompt(th, "API key for "+m.provPick.Label, width)
+	case modeMCPKey:
+		return m.renderPrompt(th, "Bearer token for "+m.mcpPick.Name, width)
+	case modeCredName:
+		return m.renderPrompt(th, m.credSource.Label+" for "+m.provPick.Label, width)
+	}
+	return m.renderComposer(th, width)
+}
+
+func providerRows(status map[string]string) []pickerRow {
+	choices := providerChoices()
+	rows := make([]pickerRow, 0, len(choices))
+	for _, p := range choices {
+		rows = append(rows, pickerRow{label: p.Label, status: status[p.Name]})
+	}
+	return rows
+}
+
+func mcpTokenState(status map[string]string, name string) string {
+	switch status[name] {
+	case "key ok":
+		return "token ok"
+	case "":
+		return ""
+	default:
+		return "no token"
+	}
+}
+
+func (m model) renderPrompt(th theme, title string, width int) string {
+	return renderPanel(th, title, th.lineFocus, []string{padTo(m.keyIn.View(), width-4)}, width)
+}
+
+// renderComposer draws the input box, with the slash menu stacked above it
+// when the user is typing a command.
+func (m model) renderComposer(th theme, width int) string {
+	var out []string
+	if m.showingSlash() {
+		cmds := filterSlash(m.ta.Value())
+		rows := make([]pickerRow, 0, len(cmds))
+		for _, c := range cmds {
+			rows = append(rows, pickerRow{label: c.Name, detail: c.Help})
+		}
+		out = append(out, renderPicker(th, "commands", rows, m.slashSel, width))
+	}
+	body := make([]string, 0, 3)
+	for _, l := range strings.Split(m.ta.View(), "\n") {
+		body = append(body, padTo(l, width-4))
+	}
+	out = append(out, renderPanel(th, "input", th.lineFocus, body, width))
+	if m.err != "" {
+		out = append(out, th.style(th.danger).Render(" "+truncTo(m.err, width-1)))
+	}
+	return strings.Join(out, "\n")
 }
 
 func formatToolLine(tool, status, text, errText string) string {
@@ -934,40 +961,6 @@ func formatToolLine(tool, status, text, errText string) string {
 	default:
 		return "  ▸ " + tool + "  " + text
 	}
-}
-
-func wrapLog(lines []string, width int) []string {
-	if width < 8 {
-		width = 8
-	}
-	var out []string
-	for _, line := range lines {
-		out = append(out, wrapLine(line, width)...)
-	}
-	return out
-}
-
-func wrapLine(s string, width int) []string {
-	s = strings.ReplaceAll(s, "\t", "    ")
-	if s == "" {
-		return []string{""}
-	}
-	var lines []string
-	for _, para := range strings.Split(s, "\n") {
-		for len(para) > width {
-			cut := strings.LastIndex(para[:width], " ")
-			if cut < width/4 {
-				cut = width
-			}
-			lines = append(lines, strings.TrimRight(para[:cut], " "))
-			para = strings.TrimLeft(para[cut:], " ")
-		}
-		lines = append(lines, para)
-	}
-	if len(lines) == 0 {
-		return []string{""}
-	}
-	return lines
 }
 
 func tail(in []string, n int) []string {
