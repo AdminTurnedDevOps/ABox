@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -21,8 +20,7 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/agent"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/brokerclient"
-	"github.com/AdminTurnedDevOps/ABox/internal/guest/egress"
-	guestmcp "github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
+	"github.com/AdminTurnedDevOps/ABox/internal/guest/mcpclient"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 	"golang.org/x/sys/unix"
@@ -37,9 +35,6 @@ func main() {
 
 func run() error {
 	prepMounts()
-	if err := egress.ConfigureGuestResolver(); err != nil {
-		fmt.Fprintf(os.Stderr, "abox-guest: resolver: %v\n", err)
-	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -48,23 +43,18 @@ func run() error {
 	if err := os.MkdirAll(repo.Root, 0o755); err != nil {
 		return err
 	}
-	for _, s := range cfg.MCPServers {
-		if u, err := url.Parse(s.URL); err == nil {
-			egress.Allow(u.Hostname())
-		}
+	if len(cfg.Secrets) > 0 || len(cfg.MCPServers) > 0 {
+		return fmt.Errorf("legacy guest config contains credentials or MCP endpoints; rebuild the session")
 	}
-	mcpMgr := guestmcp.New(cfg.MCPServers, cfg.Secrets)
-	if err := mcpMgr.Connect(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "abox-guest: mcp: %v\n", err)
-	}
-	defer mcpMgr.Close()
 	bclient := brokerclient.New()
+	mcpClient := mcpclient.New(bclient)
 	loop := &agent.Loop{
-		Model:       config.ModelFromGuest(cfg.Model),
-		Repo:        repo,
-		MCP:         mcpMgr,
-		ContextFile: agent.DefaultContextFile,
-		Stream:      bclient.Stream,
+		Model:             config.ModelFromGuest(cfg.Model),
+		Repo:              repo,
+		MCP:               mcpClient,
+		ContextFile:       agent.DefaultContextFile,
+		Stream:            bclient.Stream,
+		ApproveRunCommand: bclient.RequestRunCommandApproval,
 	}
 	if err := loop.LoadContext(); err != nil {
 		fmt.Fprintf(os.Stderr, "abox-guest: context: %v\n", err)
@@ -93,11 +83,13 @@ func run() error {
 	if ack.Error != nil {
 		return ack.Error
 	}
-	if len(ack.Result) > 0 {
-		var ackRes protocol.HelloResult
-		if err := json.Unmarshal(ack.Result, &ackRes); err == nil {
-			bclient.SetHostProtocol(ackRes.Protocol)
-		}
+	var ackRes protocol.HelloResult
+	if len(ack.Result) == 0 || json.Unmarshal(ack.Result, &ackRes) != nil || !ackRes.Accepted {
+		return fmt.Errorf("host rejected guest protocol")
+	}
+	bclient.SetHostProtocol(ackRes.Protocol)
+	if ackRes.Protocol < 4 {
+		return fmt.Errorf("host protocol %d cannot enforce brokered MCP and command approvals; run make build", ackRes.Protocol)
 	}
 
 	w := &connWriter{c: conn}
@@ -156,7 +148,7 @@ func run() error {
 			}
 			return nil
 		default:
-			resp := handle(loop, repo, mcpMgr, &archive, frame)
+			resp := handle(loop, repo, &archive, frame)
 			if err := w.write(resp); err != nil {
 				return err
 			}
@@ -312,6 +304,7 @@ func runTurn(w *connWriter, turns *turnTracker, loop *agent.Loop, bclient *broke
 	turns.setCancel(req.ID, cancel)
 	loop.MaxTurns = p.MaxTurns
 	loop.Rich = p.RichEvents
+	loop.TurnID = req.ID
 	if p.RichEvents {
 		loop.Stream = bclient.StreamWithUsage
 	} else {
@@ -335,32 +328,12 @@ func runTurn(w *connWriter, turns *turnTracker, loop *agent.Loop, bclient *broke
 	_ = w.write(protocol.Frame{ID: req.ID, Result: ok})
 }
 
-func applySecrets(secrets map[string]string) {
-	for k, v := range secrets {
-		if k != "" && v != "" {
-			_ = os.Setenv(k, v)
-		}
-	}
-}
-
-func handle(loop *agent.Loop, repo tools.Repo, mcpMgr *guestmcp.Manager, archive *bytes.Buffer, req protocol.Frame) protocol.Frame {
+func handle(loop *agent.Loop, repo tools.Repo, archive *bytes.Buffer, req protocol.Frame) protocol.Frame {
 	out := protocol.Frame{V: protocol.Version, ID: req.ID}
 	var err error
 	switch req.Method {
 	case "get_context":
 		out.Result, _ = protocol.EncodeParams(protocol.GetContextResult{History: loop.History()})
-	case "set_mcp_tokens":
-		p, e := protocol.DecodeParams[protocol.SetMCPTokensParams](req.Params)
-		if e != nil {
-			err = e
-			break
-		}
-		applySecrets(p.Secrets)
-		if mcpMgr != nil {
-			mcpMgr.SetSecrets(p.Secrets)
-			_ = mcpMgr.Connect(context.Background())
-		}
-		out.Result, _ = protocol.EncodeParams(map[string]bool{"ok": true})
 	case "set_model":
 		p, e := protocol.DecodeParams[protocol.SetModelParams](req.Params)
 		if e != nil {

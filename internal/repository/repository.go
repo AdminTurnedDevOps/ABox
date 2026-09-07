@@ -39,17 +39,20 @@ func ValidateClean(start string) (Snapshot, error) {
 }
 
 // OpenForSession uses a clean committed worktree when one exists.
-// Otherwise it copies the current directory into scratchDir, makes a
+// Otherwise it copies the repository worktree into scratchDir, makes a
 // private commit there, and returns that. The host Git repo is not changed.
 func OpenForSession(start, scratchDir string) (Snapshot, error) {
-	if snap, err := ValidateClean(start); err == nil {
+	root, err := TopLevel(start)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("not a git worktree: %w", err)
+	}
+	if snap, err := ValidateClean(root); err == nil {
 		return snap, nil
 	}
-	abs, err := filepath.Abs(start)
-	if err != nil {
-		return Snapshot{}, err
+	if hasUnsupportedSubmodules(root) {
+		return Snapshot{}, fmt.Errorf("submodules are not supported in milestone one")
 	}
-	if err := copyWorktree(abs, scratchDir); err != nil {
+	if err := copyWorktree(root, scratchDir); err != nil {
 		return Snapshot{}, fmt.Errorf("ephemeral snapshot: %w", err)
 	}
 	if err := initScratchRepo(scratchDir); err != nil {
@@ -60,7 +63,7 @@ func OpenForSession(start, scratchDir string) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("ephemeral snapshot: %w", err)
 	}
 	snap.Ephemeral = true
-	snap.HostSource = abs
+	snap.HostSource = root
 	return snap, nil
 }
 
@@ -116,28 +119,46 @@ func copyWorktree(src, dst string) error {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return err
 	}
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+	cmd := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	cmd.Dir = src
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("git ls-files: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	for _, name := range bytes.Split(out, []byte{0}) {
+		if len(name) == 0 {
+			continue
+		}
+		rel := filepath.FromSlash(string(name))
+		clean := filepath.Clean(rel)
+		if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("unsafe repository path %q", rel)
+		}
+		path := src
+		var info os.FileInfo
+		parts := strings.Split(clean, string(filepath.Separator))
+		for i, part := range parts {
+			path = filepath.Join(path, part)
+			info, err = os.Lstat(path)
+			if err != nil {
+				break
+			}
+			if info.Mode()&os.ModeSymlink != 0 || i < len(parts)-1 && !info.IsDir() {
+				return fmt.Errorf("unsupported file type %q", rel)
+			}
+		}
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue // A tracked file deleted in the dirty worktree stays deleted.
+			}
 			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		base := filepath.Base(path)
-		if info.IsDir() && (base == ".git" || base == "bin") {
-			return filepath.SkipDir
-		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, 0o755)
 		}
 		if !info.Mode().IsRegular() {
-			return nil
+			return fmt.Errorf("unsupported file type %q", rel)
 		}
+		target := filepath.Join(dst, clean)
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
@@ -145,8 +166,14 @@ func copyWorktree(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(target, data, info.Mode().Perm())
-	})
+		if err := os.WriteFile(target, data, info.Mode().Perm()); err != nil {
+			return err
+		}
+		if err := os.Chmod(target, info.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func initScratchRepo(dir string) error {

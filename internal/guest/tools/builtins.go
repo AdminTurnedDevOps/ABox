@@ -30,6 +30,8 @@ type Spec struct {
 	Parameters  map[string]any
 }
 
+type RunCommandApprover func(context.Context, protocol.RunCommandParams, time.Duration) error
+
 func BuiltinSpecs() []Spec {
 	obj := func(props map[string]any) map[string]any {
 		return map[string]any{"type": "object", "properties": props}
@@ -64,7 +66,7 @@ func IsBuiltin(name string) bool {
 
 // CallBuiltin runs a host-guest RPC builtin. Empty params are an error.
 func (r Repo) CallBuiltin(name string, raw json.RawMessage, timeout time.Duration) (any, error) {
-	return r.call(context.Background(), name, raw, timeout, false)
+	return r.call(context.Background(), name, raw, timeout, false, nil)
 }
 
 // CallTool runs a model-facing builtin. Empty or invalid JSON uses zero params plus agent defaults.
@@ -73,10 +75,14 @@ func (r Repo) CallTool(name string, raw json.RawMessage, timeout time.Duration) 
 }
 
 func (r Repo) CallToolCtx(ctx context.Context, name string, raw json.RawMessage, timeout time.Duration) (any, error) {
-	return r.call(ctx, name, raw, timeout, true)
+	return r.call(ctx, name, raw, timeout, true, nil)
 }
 
-func (r Repo) call(ctx context.Context, name string, raw json.RawMessage, timeout time.Duration, agent bool) (any, error) {
+func (r Repo) CallApprovedToolCtx(ctx context.Context, name string, raw json.RawMessage, timeout time.Duration, approve RunCommandApprover) (any, error) {
+	return r.call(ctx, name, raw, timeout, true, approve)
+}
+
+func (r Repo) call(ctx context.Context, name string, raw json.RawMessage, timeout time.Duration, agent bool, approve RunCommandApprover) (any, error) {
 	switch name {
 	case ListFiles:
 		p, err := unmarshalParams[protocol.ListFilesParams](raw, agent)
@@ -139,9 +145,31 @@ func (r Repo) call(ctx context.Context, name string, raw json.RawMessage, timeou
 		if err != nil {
 			return nil, err
 		}
+		if len(p.Command) > protocol.MaxModelCommandBytes {
+			return nil, fmt.Errorf("command exceeds %d bytes", protocol.MaxModelCommandBytes)
+		}
 		to := timeout
 		if to <= 0 && p.Timeout > 0 {
 			to = time.Duration(p.Timeout) * time.Second
+		}
+		if to <= 0 {
+			to = 60 * time.Second
+		}
+		if agent {
+			if approve == nil {
+				return nil, fmt.Errorf("run_command approval is required")
+			}
+			if p.WorkDir != "" {
+				if _, err := r.Resolve(p.WorkDir); err != nil {
+					return nil, err
+				}
+			}
+			if err := approve(ctx, p, to); err != nil {
+				return nil, err
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 		}
 		exit, stdout, stderr, dur, trunc, err := r.RunContext(ctx, p.Command, p.WorkDir, to, DefaultMaxOutput)
 		return protocol.RunCommandResult{

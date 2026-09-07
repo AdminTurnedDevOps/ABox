@@ -11,35 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AdminTurnedDevOps/ABox/internal/agentapi"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
-type Event struct {
-	Type       string
-	Text       string
-	ToolName   string
-	ToolID     string
-	ToolArgs   string
-	Err        error
-	Usage      *protocol.UsageInfo
-	StopReason string
-}
-
-type Message struct {
-	Role       string
-	Content    string
-	ToolID     string
-	ToolName   string
-	ToolArgs   string
-	ToolResult string
-}
-
-type ToolSchema struct {
-	Name        string
-	Description string
-	Parameters  map[string]any
-}
+type Event = agentapi.Event
+type Message = agentapi.Message
+type ToolSchema = agentapi.ToolSchema
 
 // Stream never reads the environment or builds its own client.
 func Stream(ctx context.Context, model config.Model, key string, client *http.Client, messages []Message, tools []ToolSchema) (<-chan Event, error) {

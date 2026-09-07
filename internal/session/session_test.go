@@ -10,15 +10,13 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 )
 
-func TestWriteGuestConfigIncludesMCPNoSecrets(t *testing.T) {
+func TestWriteGuestConfigExcludesMCPAndSecrets(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, err := Create("/repo", "deadbeef")
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = s.WriteGuestConfig(config.Model{Name: "grok"}, []config.MCPServer{
-		{Name: "gh", URL: "https://api.githubcopilot.com/mcp/", CredentialEnv: "ABOX_MCP_GH_TOKEN"},
-	})
+	err = s.WriteGuestConfig(config.Model{Name: "grok"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,8 +25,8 @@ func TestWriteGuestConfigIncludesMCPNoSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(data)
-	if !strings.Contains(body, "api.githubcopilot.com") || !strings.Contains(body, "ABOX_MCP_GH_TOKEN") {
-		t.Fatalf("guest config missing mcp: %s", body)
+	if strings.Contains(body, "mcp_servers") || strings.Contains(body, "api.githubcopilot.com") || strings.Contains(body, "ABOX_MCP_GH_TOKEN") {
+		t.Fatalf("guest config leaked MCP policy: %s", body)
 	}
 	if strings.Contains(body, `"secrets"`) {
 		t.Fatalf("guest config leaked a secrets key: %s", body)

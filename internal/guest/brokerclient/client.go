@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AdminTurnedDevOps/ABox/internal/agentapi"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
-	"github.com/AdminTurnedDevOps/ABox/internal/provider"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
@@ -58,7 +58,7 @@ func (p *pendingCall) complete(frame protocol.Frame) {
 }
 
 type clientStream struct {
-	out     chan provider.Event
+	out     chan agentapi.Event
 	notify  chan struct{}
 	abort   chan struct{}
 	settled chan struct{}
@@ -73,20 +73,20 @@ type clientStream struct {
 }
 
 type queuedEvent struct {
-	event provider.Event
+	event agentapi.Event
 	size  int
 }
 
 func newClientStream() *clientStream {
 	s := &clientStream{
-		out: make(chan provider.Event), notify: make(chan struct{}, 1),
+		out: make(chan agentapi.Event), notify: make(chan struct{}, 1),
 		abort: make(chan struct{}), settled: make(chan struct{}),
 	}
 	go s.pump()
 	return s
 }
 
-func (s *clientStream) enqueue(ev provider.Event, terminal bool, size int) error {
+func (s *clientStream) enqueue(ev agentapi.Event, terminal bool, size int) error {
 	s.mu.Lock()
 	if s.sealed {
 		s.mu.Unlock()
@@ -166,7 +166,7 @@ func (s *clientStream) pump() {
 			s.terminalErr = nil
 			s.mu.Unlock()
 			select {
-			case s.out <- provider.Event{Type: "error", Err: err}:
+			case s.out <- agentapi.Event{Type: "error", Err: err}:
 			case <-s.abort:
 				return
 			}
@@ -216,6 +216,11 @@ func (c *Client) hostProtocol() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hostProto
+}
+
+// HostProtocol returns the protocol version negotiated with the host.
+func (c *Client) HostProtocol() int {
+	return c.hostProtocol()
 }
 
 func (c *Client) HandleFrame(f protocol.Frame) bool {
@@ -285,21 +290,51 @@ func (c *Client) call(ctx context.Context, method string, params any) (protocol.
 	}
 }
 
+// Call performs a guest-initiated host RPC. Semantic clients are responsible
+// for checking that the negotiated protocol supports the requested method.
+func (c *Client) Call(ctx context.Context, method string, params any) (protocol.Frame, error) {
+	return c.call(ctx, method, params)
+}
+
+func (c *Client) RequestRunCommandApproval(ctx context.Context, params protocol.RunCommandApprovalParams) (protocol.ApprovalDecision, error) {
+	if c.HostProtocol() < 4 {
+		return protocol.ApprovalDeny, fmt.Errorf("%w (host speaks protocol %d)", ErrHostTooOld, c.HostProtocol())
+	}
+	frame, err := c.call(ctx, "request_run_command_approval", params)
+	if err != nil {
+		return protocol.ApprovalDeny, err
+	}
+	if frame.Error != nil {
+		return protocol.ApprovalDeny, frame.Error
+	}
+	var result protocol.RunCommandApprovalResult
+	if err := json.Unmarshal(frame.Result, &result); err != nil {
+		return protocol.ApprovalDeny, fmt.Errorf("malformed approval response")
+	}
+	if result.Decision != protocol.ApprovalAllowOnce && result.Decision != protocol.ApprovalDeny {
+		return protocol.ApprovalDeny, fmt.Errorf("invalid approval decision")
+	}
+	return result.Decision, nil
+}
+
 // A canceled provider_open can still succeed on the host; cancel that stream
 // so it does not occupy a slot until idle timeout.
 func (c *Client) reapCanceledCall(id string, call *pendingCall, method string) {
-	timer := time.NewTimer(canceledCallGrace)
-	defer timer.Stop()
-	select {
-	case <-call.ready:
-	case <-timer.C:
+	if method != "provider_open" {
+		timer := time.NewTimer(canceledCallGrace)
+		defer timer.Stop()
+		select {
+		case <-call.ready:
+		case <-timer.C:
+			c.forgetPending(id, call)
+			return
+		}
 		c.forgetPending(id, call)
 		return
 	}
+	<-call.ready
 	c.forgetPending(id, call)
-	if method == "provider_open" {
-		c.cancelOpenedFromFrame(call.frame)
-	}
+	c.cancelOpenedFromFrame(call.frame)
 }
 
 func (c *Client) forgetPending(id string, call *pendingCall) {
@@ -327,15 +362,15 @@ func (c *Client) cancelOpenedFromFrame(frame protocol.Frame) {
 	c.cancelHost(openRes.StreamID)
 }
 
-func (c *Client) Stream(ctx context.Context, model config.Model, messages []provider.Message, tools []provider.ToolSchema) (<-chan provider.Event, error) {
+func (c *Client) Stream(ctx context.Context, model config.Model, messages []agentapi.Message, tools []agentapi.ToolSchema) (<-chan agentapi.Event, error) {
 	return c.stream(ctx, model, messages, tools, false)
 }
 
-func (c *Client) StreamWithUsage(ctx context.Context, model config.Model, messages []provider.Message, tools []provider.ToolSchema) (<-chan provider.Event, error) {
+func (c *Client) StreamWithUsage(ctx context.Context, model config.Model, messages []agentapi.Message, tools []agentapi.ToolSchema) (<-chan agentapi.Event, error) {
 	return c.stream(ctx, model, messages, tools, true)
 }
 
-func (c *Client) stream(ctx context.Context, model config.Model, messages []provider.Message, tools []provider.ToolSchema, rich bool) (<-chan provider.Event, error) {
+func (c *Client) stream(ctx context.Context, model config.Model, messages []agentapi.Message, tools []agentapi.ToolSchema, rich bool) (<-chan agentapi.Event, error) {
 	if c.hostProtocol() < 3 {
 		return nil, fmt.Errorf("%w (host speaks protocol %d)", ErrHostTooOld, c.hostProtocol())
 	}
@@ -455,7 +490,7 @@ func (c *Client) dispatchEvent(f protocol.Frame) {
 		c.Close(fmt.Errorf("malformed provider event: %w", err))
 		return
 	}
-	ev := provider.Event{
+	ev := agentapi.Event{
 		Type: p.Type, Text: p.Text,
 		ToolID: p.ToolID, ToolName: p.ToolName, ToolArgs: p.ToolArgs,
 		Usage: p.Usage, StopReason: p.StopReason,

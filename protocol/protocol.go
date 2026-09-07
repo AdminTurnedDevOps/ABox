@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	Version = 3 // host provider broker; LLM credentials stay on the host
+	Version = 4 // host provider/MCP brokers and model-command approval
 
 	MaxFrameBytes   = 1 << 20
 	MaxArchiveChunk = 256 << 10
@@ -27,6 +27,12 @@ const (
 	MaxProviderEvents   = 1 << 20   // events in one provider stream
 	MaxProviderStreams  = 2         // concurrent provider streams per session
 	MaxGuestCalls       = 8         // concurrent guest-initiated host RPCs
+
+	MaxModelCommandBytes = 16 << 10
+	MaxMCPTools          = MaxProviderTools - 5
+	MaxMCPSchemaBytes    = 64 << 10
+	MaxMCPArgsBytes      = 512 << 10
+	MaxMCPResultBytes    = 512 << 10
 )
 
 // Frame is a length-prefixed JSON message.
@@ -148,6 +154,25 @@ type RunCommandResult struct {
 	Trunc    bool   `json:"truncated"`
 }
 
+type ApprovalDecision string
+
+const (
+	ApprovalDeny      ApprovalDecision = "deny"
+	ApprovalAllowOnce ApprovalDecision = "allow_once"
+)
+
+type RunCommandApprovalParams struct {
+	TurnID     string `json:"turn_id"`
+	ToolID     string `json:"tool_id,omitempty"`
+	Command    string `json:"command"`
+	WorkDir    string `json:"workdir,omitempty"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+}
+
+type RunCommandApprovalResult struct {
+	Decision ApprovalDecision `json:"decision"`
+}
+
 type ArchiveChunkParams struct {
 	Offset int64  `json:"offset"`
 	Last   bool   `json:"last"`
@@ -214,6 +239,37 @@ type SetModelParams struct {
 
 type SetMCPTokensParams struct {
 	Secrets map[string]string `json:"secrets"`
+}
+
+type MCPTool struct {
+	Server      string         `json:"server"`
+	Name        string         `json:"name"`
+	Prefixed    string         `json:"prefixed"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+type MCPListParams struct{}
+
+type MCPListResult struct {
+	Tools []MCPTool `json:"tools"`
+}
+
+type MCPCallParams struct {
+	CallID    string          `json:"call_id"`
+	Server    string          `json:"server"`
+	Tool      string          `json:"tool"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+type MCPCallResult struct {
+	Text      string `json:"text,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type MCPCancelParams struct {
+	CallID string `json:"call_id"`
 }
 
 // Model is a configured alias, never a URL, header, or credential name.
@@ -370,6 +426,23 @@ func DecodeParams[T any](raw json.RawMessage) (T, error) {
 	}
 	err := json.Unmarshal(raw, &v)
 	return v, err
+}
+
+// GuestMethodMinVersion returns the minimum negotiated protocol for a
+// guest-initiated host RPC. Unknown methods are rejected by the runtime.
+func GuestMethodMinVersion(method string) (int, bool) {
+	switch method {
+	case "provider_open", "provider_send", "provider_cancel":
+		return 3, true
+	case "mcp_list", "mcp_call", "mcp_cancel", "request_run_command_approval":
+		return 4, true
+	default:
+		return 0, false
+	}
+}
+
+func GuestMethodIsCancellation(method string) bool {
+	return method == "provider_cancel" || method == "mcp_cancel"
 }
 
 const DefaultRPCTimeout = 60 * time.Second

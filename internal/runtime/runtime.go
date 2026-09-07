@@ -58,6 +58,16 @@ type GuestCallHandler interface {
 		notify func(method string, params any) error) (any, *protocol.Error)
 }
 
+type RunCommandApprover interface {
+	ApproveRunCommand(context.Context, protocol.RunCommandApprovalParams) (protocol.ApprovalDecision, error)
+}
+
+type RunCommandApproverFunc func(context.Context, protocol.RunCommandApprovalParams) (protocol.ApprovalDecision, error)
+
+func (f RunCommandApproverFunc) ApproveRunCommand(ctx context.Context, params protocol.RunCommandApprovalParams) (protocol.ApprovalDecision, error) {
+	return f(ctx, params)
+}
+
 type Sandbox struct {
 	Sess          *session.Session
 	History       []protocol.HistoryLine
@@ -74,7 +84,10 @@ type Sandbox struct {
 	nextID     int
 	calls      map[string]*frameQueue
 	activeTurn string
+	turnCtx    context.Context
+	turnCancel context.CancelFunc
 	turnQ      *frameQueue
+	approver   RunCommandApprover
 	lifeCtx    context.Context
 	lifeCancel context.CancelFunc
 	guestSlots chan struct{}
@@ -208,7 +221,7 @@ func (q *frameQueue) pop(ctx context.Context) (protocol.Frame, bool, error) {
 	}
 }
 
-func Prepare(sess *session.Session, imagePath string, model config.Model, mcpServers []config.MCPServer, resume bool) error {
+func Prepare(sess *session.Session, imagePath string, model config.Model, resume bool) error {
 	if imagePath == "" {
 		imagePath = config.GuestImagePath()
 	}
@@ -224,7 +237,7 @@ func Prepare(sess *session.Session, imagePath string, model config.Model, mcpSer
 			return fmt.Errorf("clone session disk: %w", err)
 		}
 	}
-	if err := sess.WriteGuestConfig(model, mcpServers); err != nil {
+	if err := sess.WriteGuestConfig(model); err != nil {
 		return err
 	}
 	data, err := os.ReadFile(sess.GuestConfigJSON())
@@ -348,6 +361,8 @@ func (s *Sandbox) waitHello(ctx context.Context) error {
 	}
 	if hello.Protocol == 0 {
 		s.GuestProtocol = 1
+	} else if hello.Protocol > protocol.Version {
+		s.GuestProtocol = protocol.Version
 	} else {
 		s.GuestProtocol = hello.Protocol
 	}
@@ -379,7 +394,7 @@ func (s *Sandbox) readLoop() {
 			switch {
 			case strings.HasPrefix(frame.ID, "g-"):
 				slots := s.guestSlots
-				if frame.Method == "provider_cancel" {
+				if protocol.GuestMethodIsCancellation(frame.Method) {
 					slots = s.cancelSlot
 				}
 				select {
@@ -457,9 +472,15 @@ func (s *Sandbox) failAll(err error) {
 		pending := s.calls
 		s.calls = map[string]*frameQueue{}
 		turnQ := s.turnQ
+		turnCancel := s.turnCancel
 		s.turnQ = nil
 		s.activeTurn = ""
+		s.turnCtx = nil
+		s.turnCancel = nil
 		s.mu.Unlock()
+		if turnCancel != nil {
+			turnCancel()
+		}
 		for _, q := range pending {
 			q.close(err)
 		}
@@ -472,14 +493,32 @@ func (s *Sandbox) failAll(err error) {
 
 func (s *Sandbox) dispatchGuestCall(frame protocol.Frame) {
 	out := protocol.Frame{V: protocol.Version, ID: frame.ID}
-	if s.GuestProtocol < 3 {
-		out.Error = &protocol.Error{Code: "host", Message: fmt.Sprintf("provider broker requires protocol 3, guest speaks %d", s.GuestProtocol)}
+	minimum, known := protocol.GuestMethodMinVersion(frame.Method)
+	if !known {
+		out.Error = &protocol.Error{Code: "host", Message: "unknown guest method " + frame.Method}
 		if err := s.writeFrame(out); err != nil {
 			s.failConnection(err)
 		}
 		return
 	}
-	if s.OnGuestCall == nil {
+	if s.GuestProtocol < minimum {
+		out.Error = &protocol.Error{Code: "host", Message: fmt.Sprintf("%s requires protocol %d, guest speaks %d", frame.Method, minimum, s.GuestProtocol)}
+		if err := s.writeFrame(out); err != nil {
+			s.failConnection(err)
+		}
+		return
+	}
+	if frame.Method == "request_run_command_approval" {
+		s.dispatchRunCommandApproval(frame, &out)
+		if err := s.writeFrame(out); err != nil {
+			s.failConnection(err)
+		}
+		return
+	}
+	s.mu.Lock()
+	handler := s.OnGuestCall
+	s.mu.Unlock()
+	if handler == nil {
 		out.Error = &protocol.Error{Code: "host", Message: "guest calls not supported by this host"}
 		if err := s.writeFrame(out); err != nil {
 			s.failConnection(err)
@@ -501,7 +540,7 @@ func (s *Sandbox) dispatchGuestCall(frame protocol.Frame) {
 		}
 		return nil
 	}
-	res, perr := s.OnGuestCall.Handle(s.lifeCtx, frame.Method, frame.Params, notify)
+	res, perr := handler.Handle(s.lifeCtx, frame.Method, frame.Params, notify)
 	switch {
 	case perr != nil:
 		out.Error = perr
@@ -518,6 +557,43 @@ func (s *Sandbox) dispatchGuestCall(frame protocol.Frame) {
 	if err := s.writeFrame(out); err != nil {
 		s.failConnection(err)
 	}
+}
+
+func (s *Sandbox) dispatchRunCommandApproval(frame protocol.Frame, out *protocol.Frame) {
+	params, err := protocol.DecodeParams[protocol.RunCommandApprovalParams](frame.Params)
+	if err != nil || params.TurnID == "" || len(params.Command) > protocol.MaxModelCommandBytes {
+		out.Error = &protocol.Error{Code: "host", Message: "invalid run_command approval request"}
+		return
+	}
+	s.mu.Lock()
+	active := s.activeTurn
+	turnCtx := s.turnCtx
+	approver := s.approver
+	s.mu.Unlock()
+	decision := protocol.ApprovalDeny
+	if active == params.TurnID && turnCtx != nil && approver != nil && turnCtx.Err() == nil {
+		got, approveErr := approver.ApproveRunCommand(turnCtx, params)
+		if approveErr == nil && got == protocol.ApprovalAllowOnce && turnCtx.Err() == nil {
+			decision = protocol.ApprovalAllowOnce
+		}
+	}
+	out.Result, _ = protocol.EncodeParams(protocol.RunCommandApprovalResult{Decision: decision})
+}
+
+func (s *Sandbox) SetGuestCallHandler(handler GuestCallHandler) {
+	s.mu.Lock()
+	s.OnGuestCall = handler
+	s.mu.Unlock()
+}
+
+func (s *Sandbox) SetRunCommandApprover(approver RunCommandApprover) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeTurn != "" {
+		return fmt.Errorf("cannot change command approver during a turn")
+	}
+	s.approver = approver
+	return nil
 }
 
 func (s *Sandbox) writeBusyReplies() {
@@ -639,6 +715,9 @@ func (s *Sandbox) UserTurnCtx(ctx context.Context, text string, opts TurnOptions
 }
 
 func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOptions, onEvent func(protocol.AgentEvent), v2API bool) (*TurnOutcome, error) {
+	if s.GuestProtocol < 4 {
+		return nil, fmt.Errorf("%w: command approval requires protocol 4, guest speaks %d", ErrGuestTooOld, s.GuestProtocol)
+	}
 	if v2API && opts.needsV2() && s.GuestProtocol < 2 {
 		return nil, fmt.Errorf("%w: need protocol 2, guest speaks %d", ErrGuestTooOld, s.GuestProtocol)
 	}
@@ -665,7 +744,10 @@ func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOpti
 		return nil, err
 	}
 	turnQ := newFrameQueue(turnQueueFrames, turnQueueBytes)
+	turnCtx, turnCancel := context.WithCancel(ctx)
 	s.activeTurn = id
+	s.turnCtx = turnCtx
+	s.turnCancel = turnCancel
 	s.turnQ = turnQ
 	s.mu.Unlock()
 	if err := s.writeFrame(protocol.Frame{V: protocol.Version, ID: id, Method: "user_turn", Params: raw}); err != nil {
@@ -676,9 +758,12 @@ func (s *Sandbox) userTurnLocked(ctx context.Context, text string, opts TurnOpti
 		s.mu.Lock()
 		if s.activeTurn == id {
 			s.activeTurn = ""
+			s.turnCtx = nil
+			s.turnCancel = nil
 			s.turnQ = nil
 		}
 		s.mu.Unlock()
+		turnCancel()
 		turnQ.close(context.Canceled)
 	}()
 
@@ -765,36 +850,23 @@ func (s *Sandbox) PushSecrets(ctx context.Context, model config.Model, secrets m
 	if len(secrets) == 0 {
 		return nil
 	}
+	if s.GuestProtocol >= 3 {
+		return nil
+	}
 	if s.GuestProtocol < 2 {
 		return fmt.Errorf("guest image predates secret push; run make image")
 	}
-	if s.GuestProtocol == 2 {
-		fmt.Fprintf(os.Stderr, "abox: guest speaks protocol 2; pushing legacy secrets (run make image to upgrade)\n")
-	}
+	fmt.Fprintf(os.Stderr, "abox: guest speaks protocol 2; pushing one legacy model credential (run make image to upgrade)\n")
 	modelKey := model.EnvName()
-	rest := map[string]string{}
-	for k, v := range secrets {
-		if k != modelKey {
-			rest[k] = v
-		}
+	modelSecrets := map[string]string{}
+	if v, ok := secrets[modelKey]; ok {
+		modelSecrets[modelKey] = v
 	}
-	var modelSecrets map[string]string
-	if s.GuestProtocol < 3 {
-		if v, ok := secrets[modelKey]; ok {
-			modelSecrets = map[string]string{modelKey: v}
-		}
-	}
-	if err := s.SetModel(ctx, model, modelSecrets); err != nil {
-		return err
-	}
-	if len(rest) > 0 {
-		return s.SetMCPTokens(ctx, rest)
-	}
-	return nil
+	return s.SetModel(ctx, model, modelSecrets)
 }
 
 func (s *Sandbox) SetMCPTokens(ctx context.Context, secrets map[string]string) error {
-	return s.Call(ctx, "set_mcp_tokens", protocol.SetMCPTokensParams{Secrets: secrets}, nil)
+	return fmt.Errorf("MCP credentials are host-brokered and cannot be sent to the guest")
 }
 
 func (s *Sandbox) SetModel(ctx context.Context, model config.Model, secrets map[string]string) error {

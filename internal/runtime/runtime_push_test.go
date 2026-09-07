@@ -59,7 +59,7 @@ func newPipeSandbox(t *testing.T, guestProtocol int) (*Sandbox, *fakeGuest) {
 	return s, g
 }
 
-func TestPushSecretsOrderAndSplit(t *testing.T) {
+func TestPushSecretsProto2SendsOnlyModelCredential(t *testing.T) {
 	s, g := newPipeSandbox(t, 2)
 	var order []string
 	var mu sync.Mutex
@@ -79,17 +79,6 @@ func TestPushSecretsOrderAndSplit(t *testing.T) {
 			if len(p.Secrets) != 1 {
 				t.Errorf("set_model carries more than the model credential: %v", p.Secrets)
 			}
-		case "set_mcp_tokens":
-			p, err := protocol.DecodeParams[protocol.SetMCPTokensParams](frame.Params)
-			if err != nil {
-				t.Errorf("set_mcp_tokens params: %v", err)
-			}
-			if p.Secrets["ABOX_MCP_GH_TOKEN"] != "mt" {
-				t.Errorf("set_mcp_tokens missing mcp token: %v", p.Secrets)
-			}
-			if _, ok := p.Secrets["XAI_API_KEY"]; ok {
-				t.Errorf("model credential leaked into set_mcp_tokens: %v", p.Secrets)
-			}
 		default:
 			t.Errorf("unexpected method %q", frame.Method)
 		}
@@ -106,7 +95,7 @@ func TestPushSecretsOrderAndSplit(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(order) != 2 || order[0] != "set_model" || order[1] != "set_mcp_tokens" {
+	if len(order) != 1 || order[0] != "set_model" {
 		t.Fatalf("order %v", order)
 	}
 }
@@ -114,28 +103,7 @@ func TestPushSecretsOrderAndSplit(t *testing.T) {
 func TestPushSecretsProto3FiltersModelCredential(t *testing.T) {
 	s, g := newPipeSandbox(t, 3)
 	g.onRequest = func(frame protocol.Frame, reply func(protocol.Frame)) {
-		switch frame.Method {
-		case "set_model":
-			p, err := protocol.DecodeParams[protocol.SetModelParams](frame.Params)
-			if err != nil {
-				t.Errorf("params: %v", err)
-			}
-			if len(p.Secrets) != 0 {
-				t.Errorf("proto-3 set_model must carry no secrets: %v", p.Secrets)
-			}
-		case "set_mcp_tokens":
-			p, _ := protocol.DecodeParams[protocol.SetMCPTokensParams](frame.Params)
-			if p.Secrets["ABOX_MCP_GH_TOKEN"] != "mt" {
-				t.Errorf("mcp token missing: %v", p.Secrets)
-			}
-			if _, ok := p.Secrets["XAI_API_KEY"]; ok {
-				t.Errorf("model credential leaked to proto-3 guest: %v", p.Secrets)
-			}
-		default:
-			t.Errorf("unexpected method %q", frame.Method)
-		}
-		ok, _ := protocol.EncodeParams(map[string]bool{"ok": true})
-		reply(protocol.Frame{ID: frame.ID, Result: ok})
+		t.Errorf("protocol-3 guest received secret push %q", frame.Method)
 	}
 	model := config.Model{Name: "grok-default", Provider: "xai", CredentialEnv: "XAI_API_KEY"}
 	err := s.PushSecrets(context.Background(), model, map[string]string{
@@ -186,7 +154,7 @@ func TestSetModelDropsSecretsOnProto3(t *testing.T) {
 }
 
 func TestGuestCallMidTurn(t *testing.T) {
-	s, g := newPipeSandbox(t, 3)
+	s, g := newPipeSandbox(t, 4)
 	turnStarted := make(chan string, 1)
 	gotOpen := make(chan protocol.ProviderOpenResult, 1)
 	g.onRequest = func(frame protocol.Frame, reply func(protocol.Frame)) {
@@ -349,7 +317,7 @@ func TestGuestCallConcurrencyReturnsBusy(t *testing.T) {
 	}
 	s.startReading()
 	for i := 0; i < regularSlots; i++ {
-		g.write(protocol.Frame{V: protocol.Version, ID: fmt.Sprintf("g-%d", i), Method: "hold", Params: []byte(`{}`)})
+		g.write(protocol.Frame{V: protocol.Version, ID: fmt.Sprintf("g-%d", i), Method: "provider_open", Params: []byte(`{}`)})
 		select {
 		case <-started:
 		case <-time.After(2 * time.Second):
@@ -365,7 +333,7 @@ func TestGuestCallConcurrencyReturnsBusy(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("provider cancellation was blocked by regular guest calls")
 	}
-	g.write(protocol.Frame{V: protocol.Version, ID: "g-busy", Method: "hold", Params: []byte(`{}`)})
+	g.write(protocol.Frame{V: protocol.Version, ID: "g-busy", Method: "provider_open", Params: []byte(`{}`)})
 	select {
 	case frame := <-busy:
 		if frame.ID != "g-busy" || frame.Error.Code != "busy" {
@@ -386,7 +354,7 @@ func TestGuestCallContextEndsWithConnection(t *testing.T) {
 		return nil, &protocol.Error{Code: "canceled", Message: ctx.Err().Error()}
 	})
 	s.startReading()
-	g.write(protocol.Frame{V: protocol.Version, ID: "g-life", Method: "hold", Params: []byte(`{}`)})
+	g.write(protocol.Frame{V: protocol.Version, ID: "g-life", Method: "provider_open", Params: []byte(`{}`)})
 	s.failConnection(errors.New("test disconnect"))
 	select {
 	case <-canceled:

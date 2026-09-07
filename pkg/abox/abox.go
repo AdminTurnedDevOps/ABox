@@ -11,7 +11,7 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
-	"github.com/AdminTurnedDevOps/ABox/internal/llmbroker"
+	"github.com/AdminTurnedDevOps/ABox/internal/hostbroker"
 	"github.com/AdminTurnedDevOps/ABox/internal/repository"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
 	"github.com/AdminTurnedDevOps/ABox/internal/session"
@@ -54,16 +54,16 @@ func Resume(ctx context.Context, sessionID string, opts Options) (*Session, erro
 
 func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Session, error) {
 	opts = opts.withDefaults()
-	cfg, cfgPath, err := config.Load()
-	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
-	}
 	n, scrubErr := session.ScrubSecretsEverywhere()
 	if n > 0 {
 		fmt.Fprintf(os.Stderr, "abox: scrubbed plaintext secrets from %d old session(s)\n", n)
 	}
 	if scrubErr != nil {
 		return nil, fmt.Errorf("scrub legacy session secrets: %w", scrubErr)
+	}
+	cfg, cfgPath, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
 	}
 	resolver := credsource.NewResolver()
 	sel, ok := cfg.ModelNamed(opts.Model)
@@ -110,12 +110,7 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 	if image == "" {
 		image = cfg.Runtime.Image
 	}
-	mcpServers, err := cfg.ResolvedMCPServers()
-	if err != nil {
-		resolver.Close()
-		return nil, err
-	}
-	if err := runtime.Prepare(sess, image, sel, mcpServers, resume); err != nil {
+	if err := runtime.Prepare(sess, image, sel, resume); err != nil {
 		resolver.Close()
 		return nil, err
 	}
@@ -149,18 +144,18 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 		}
 		return nil, fmt.Errorf("%w: protocol-1 guest cannot use the secretless config; rebuild the guest image", ErrGuestTooOld)
 	}
-	sb.OnGuestCall = llmbroker.New(cfg, resolver)
-
-	// Push whatever resolved before returning a partial-resolution error.
-	pushCtx, pushCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer pushCancel()
-	secrets, resolveErr := credsource.ResolveSelected(pushCtx, resolver, cfg, sel)
-	pushErr := sb.PushSecrets(pushCtx, sel, secrets)
-	if err := credentialStartupError(resolveErr, pushErr); err != nil {
+	if sb.GuestProtocol < 4 {
+		sb.Stop()
+		resolver.Close()
+		return nil, fmt.Errorf("%w: guest protocol %d cannot enforce brokered MCP and command approvals; rebuild the guest image and start a new session", ErrGuestTooOld, sb.GuestProtocol)
+	}
+	broker, err := hostbroker.New(cfg, sel, resolver)
+	if err != nil {
 		sb.Stop()
 		resolver.Close()
 		return nil, err
 	}
+	sb.SetGuestCallHandler(broker)
 	if !resume {
 		archive, err := repository.ArchiveHEAD(snap.Root)
 		if err != nil {
@@ -174,7 +169,7 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 			return nil, fmt.Errorf("transfer repo: %w", err)
 		}
 	}
-	return &Session{cfg: cfg, sess: sess, sb: sb, sel: sel, resolver: resolver}, nil
+	return &Session{cfg: cfg, sess: sess, sb: sb, sel: sel, resolver: resolver, broker: broker}, nil
 }
 
 func credentialStartupError(resolveErr, pushErr error) error {
@@ -210,6 +205,33 @@ type Capabilities struct {
 	Cancel      bool
 	RichEvents  bool
 	TurnOptions bool
+	Approvals   bool
+	MCPBroker   bool
+}
+
+type ApprovalDecision uint8
+
+const (
+	ApprovalDeny ApprovalDecision = iota
+	ApprovalAllowOnce
+)
+
+type ApprovalRequest struct {
+	Tool       string
+	ToolID     string
+	Command    string
+	WorkDir    string
+	TimeoutSec int
+}
+
+type Approver interface {
+	Approve(context.Context, ApprovalRequest) (ApprovalDecision, error)
+}
+
+type ApproverFunc func(context.Context, ApprovalRequest) (ApprovalDecision, error)
+
+func (f ApproverFunc) Approve(ctx context.Context, request ApprovalRequest) (ApprovalDecision, error) {
+	return f(ctx, request)
 }
 
 type TurnOpts struct {
@@ -231,6 +253,7 @@ type Session struct {
 	sb       *runtime.Sandbox
 	sel      config.Model
 	resolver *credsource.Resolver
+	broker   *hostbroker.Broker
 }
 
 func (s *Session) ID() string { return s.sess.ID }
@@ -242,6 +265,8 @@ func (s *Session) Capabilities() Capabilities {
 		Cancel:      p >= 2,
 		RichEvents:  p >= 2,
 		TurnOptions: p >= 2,
+		Approvals:   p >= 4,
+		MCPBroker:   p >= 4,
 	}
 }
 
@@ -324,15 +349,37 @@ func (s *Session) SetModel(ctx context.Context, model string) error {
 	if err := s.sb.SetModel(ctx, sel, secrets); err != nil {
 		return err
 	}
-	// Broker snapshots config at construction; replace it after the guest accepts the model.
-	s.sb.OnGuestCall = llmbroker.New(cfg, s.resolver)
+	s.broker.UpdateModel(cfg, sel)
 	s.cfg = cfg
 	s.sel = sel
 	return nil
 }
 
 func (s *Session) SetMCPTokens(ctx context.Context, secrets map[string]string) error {
-	return s.sb.SetMCPTokens(ctx, secrets)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.broker.SetMCPTokens(secrets)
+}
+
+func (s *Session) SetApprover(approver Approver) error {
+	if !s.mu.TryLock() {
+		return fmt.Errorf("cannot set approver while a turn or model update is in progress")
+	}
+	defer s.mu.Unlock()
+	if approver == nil {
+		return s.sb.SetRunCommandApprover(nil)
+	}
+	return s.sb.SetRunCommandApprover(runtime.RunCommandApproverFunc(func(ctx context.Context, params protocol.RunCommandApprovalParams) (protocol.ApprovalDecision, error) {
+		decision, err := approver.Approve(ctx, ApprovalRequest{
+			Tool: "run_command", ToolID: params.ToolID, Command: params.Command,
+			WorkDir: params.WorkDir, TimeoutSec: params.TimeoutSec,
+		})
+		if err != nil || decision != ApprovalAllowOnce {
+			return protocol.ApprovalDeny, err
+		}
+		return protocol.ApprovalAllowOnce, nil
+	}))
 }
 
 func (s *Session) ExportPatch(ctx context.Context) (patch, summary string, err error) {
@@ -364,6 +411,9 @@ func (s *Session) Close() error {
 		return nil
 	}
 	err := s.sb.Stop()
+	if s.broker != nil {
+		err = errors.Join(err, s.broker.Close())
+	}
 	s.resolver.Close()
 	return err
 }
