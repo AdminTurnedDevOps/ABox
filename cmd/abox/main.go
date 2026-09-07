@@ -19,7 +19,7 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
 	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
-	"github.com/AdminTurnedDevOps/ABox/internal/llmbroker"
+	"github.com/AdminTurnedDevOps/ABox/internal/hostbroker"
 	"github.com/AdminTurnedDevOps/ABox/internal/mcpauth"
 	"github.com/AdminTurnedDevOps/ABox/internal/repository"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
@@ -36,6 +36,9 @@ func main() {
 }
 
 func run() error {
+	if err := scrubLegacySessions(); err != nil {
+		return err
+	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		return runMCP(os.Args[2:])
 	}
@@ -63,9 +66,6 @@ func run() error {
 
 	cfg, cfgPath, err := config.Load()
 	if err != nil {
-		return err
-	}
-	if err := scrubLegacySessions(); err != nil {
 		return err
 	}
 	resolver := credsource.NewResolver()
@@ -122,16 +122,13 @@ func run() error {
 	}
 
 	var sb *runtime.Sandbox
+	var broker *hostbroker.Broker
 	vmState := "not-started"
 	image := cfg.Runtime.Image
 	if image == "" {
 		image = config.GuestImagePath()
 	}
-	mcpServers, err := cfg.ResolvedMCPServers()
-	if err != nil {
-		return err
-	}
-	if err := runtime.Prepare(sess, image, sel, mcpServers, *resume); err != nil {
+	if err := runtime.Prepare(sess, image, sel, *resume); err != nil {
 		if execMode {
 			return err
 		}
@@ -159,10 +156,19 @@ func run() error {
 					return fmt.Errorf("protocol-1 guest cannot use the secretless config; rebuild the guest image")
 				}
 			}
+			if started.GuestProtocol < 4 && !*probeVM {
+				started.Stop()
+				return fmt.Errorf("guest protocol %d cannot enforce brokered MCP and command approvals; rebuild the guest image and start a new session", started.GuestProtocol)
+			}
 			sb = started
 			vmState = "ready"
 			defer sb.Stop()
-			sb.OnGuestCall = brokerForMode(cfg, resolver, execMode)
+			broker, err = brokerForMode(cfg, sel, resolver, execMode)
+			if err != nil {
+				return err
+			}
+			defer broker.Close()
+			sb.SetGuestCallHandler(broker)
 			if err := pushSecrets(sb, cfg, resolver, sel); err != nil {
 				if execMode {
 					return err
@@ -205,19 +211,25 @@ func run() error {
 			_ = session.WriteTranscript(sess.TranscriptPath(), transcript)
 		}
 	}
-	return tui.Run(cfg, sel, sb, vmState, transcript, resolver, sess.TranscriptPath())
+	return tui.Run(cfg, sel, sb, broker, vmState, transcript, resolver, sess.TranscriptPath())
 }
 
 // Headless logs stream lifecycle; the TUI stays quiet so logs never paint into the UI.
-func brokerForMode(cfg config.File, resolver *credsource.Resolver, execMode bool) *llmbroker.Broker {
-	b := llmbroker.New(cfg, resolver)
+func brokerForMode(cfg config.File, sel config.Model, resolver *credsource.Resolver, execMode bool) (*hostbroker.Broker, error) {
+	b, err := hostbroker.New(cfg, sel, resolver)
+	if err != nil {
+		return nil, err
+	}
 	if execMode {
 		b.SetLogger(log.Printf)
 	}
-	return b
+	return b, nil
 }
 
 func pushSecrets(sb *runtime.Sandbox, cfg config.File, resolver *credsource.Resolver, sel config.Model) error {
+	if sb.GuestProtocol >= 3 {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	secrets, resolveErr := credsource.ResolveSelected(ctx, resolver, cfg, sel)
@@ -280,9 +292,10 @@ func runExec(sb *runtime.Sandbox, prompt string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	enc := json.NewEncoder(os.Stdout)
-	return sb.UserTurn(ctx, prompt, func(e protocol.AgentEvent) {
+	_, err := sb.UserTurnCtx(ctx, prompt, runtime.TurnOptions{RichEvents: true}, func(e protocol.AgentEvent) {
 		_ = enc.Encode(e)
 	})
+	return err
 }
 
 func loadResumeSession(wd, id string) (*session.Session, error) {

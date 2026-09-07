@@ -583,8 +583,8 @@ func TestResolveSelectedOnlySelectedModel(t *testing.T) {
 	if got["XAI_API_KEY"] != "xk" {
 		t.Fatalf("model key missing: %#v", got)
 	}
-	if got["ABOX_MCP_GH_TOKEN"] != "mtok" {
-		t.Fatalf("mcp token missing: %#v", got)
+	if _, ok := got["ABOX_MCP_GH_TOKEN"]; ok {
+		t.Fatalf("mcp token must remain host-brokered: %#v", got)
 	}
 	if _, ok := got["OPENAI_API_KEY"]; ok {
 		t.Fatalf("unselected model key leaked: %#v", got)
@@ -603,7 +603,7 @@ func TestResolveSelectedMissingModelError(t *testing.T) {
 	}
 }
 
-func TestResolveSelectedReturnsMCPTokenWithModelError(t *testing.T) {
+func TestResolveSelectedDoesNotReturnMCPTokenWithModelError(t *testing.T) {
 	r := NewResolver()
 	source := &mapSource{vals: map[string]string{"env/MCP_TOKEN": "mcp-value"}}
 	r.Register("env", source)
@@ -615,12 +615,12 @@ func TestResolveSelectedReturnsMCPTokenWithModelError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "MODEL_TOKEN") {
 		t.Fatalf("got error %v", err)
 	}
-	if got["MCP_TOKEN"] != "mcp-value" {
-		t.Fatalf("partial secrets %#v", got)
+	if len(got) != 0 {
+		t.Fatalf("MCP token escaped host broker: %#v", got)
 	}
 }
 
-func TestResolveSelectedReportsMCPBackendErrorAndContinues(t *testing.T) {
+func TestResolveSelectedDoesNotResolveMCPBackends(t *testing.T) {
 	backendErr := errors.New("backend unavailable")
 	r := NewResolver()
 	source := &mapSource{
@@ -635,11 +635,11 @@ func TestResolveSelectedReportsMCPBackendErrorAndContinues(t *testing.T) {
 	}
 	model := config.Model{Name: "selected", Provider: "other", CredentialEnv: "MODEL_TOKEN"}
 	got, err := ResolveSelected(context.Background(), r, cfg, model)
-	if !errors.Is(err, backendErr) || !strings.Contains(err.Error(), `mcp server "bad"`) {
-		t.Fatalf("got error %v", err)
+	if err != nil {
+		t.Fatalf("MCP backend affected legacy model resolution: %v", err)
 	}
-	if got["MODEL_TOKEN"] != "model" || got["GOOD_TOKEN"] != "good" {
-		t.Fatalf("partial secrets %#v", got)
+	if got["MODEL_TOKEN"] != "model" || len(got) != 1 {
+		t.Fatalf("unexpected secrets %#v", got)
 	}
 }
 

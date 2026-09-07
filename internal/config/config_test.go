@@ -101,6 +101,19 @@ func TestValidateRejectsUnknownCredentialSource(t *testing.T) {
 	}
 }
 
+func TestModelBaseURLRequiresHTTPS(t *testing.T) {
+	c := Defaults()
+	c.Models[0].BaseURL = "http://api.example.com/v1"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "models[0]: base_url must be https") {
+		t.Fatalf("http base_url: %v", err)
+	}
+
+	c.Models[0].BaseURL = "https://api.example.com/v1"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("https base_url: %v", err)
+	}
+}
+
 func TestValidateFieldVersionRules(t *testing.T) {
 	c := Defaults()
 	c.Models[0].CredentialEnv = ""

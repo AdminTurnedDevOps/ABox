@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
-	"github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
 	"github.com/AdminTurnedDevOps/ABox/internal/provider"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
@@ -155,8 +154,10 @@ type stubMCP struct {
 	result string
 }
 
-func (s *stubMCP) Tools() []mcp.Tool {
-	return []mcp.Tool{{
+func (s *stubMCP) Refresh(context.Context) error { return nil }
+
+func (s *stubMCP) Tools() []protocol.MCPTool {
+	return []protocol.MCPTool{{
 		Server:      "svc",
 		Name:        "echo",
 		Prefixed:    "svc__echo",

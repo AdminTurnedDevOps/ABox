@@ -172,23 +172,13 @@ func WriteTranscript(path string, lines []string) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-func (s *Session) WriteGuestConfig(model config.Model, servers []config.MCPServer) error {
-	var gs []protocol.GuestMCPServer
-	for _, srv := range servers {
-		gs = append(gs, protocol.GuestMCPServer{
-			Name:      srv.Name,
-			URL:       srv.URL,
-			TokenEnv:  config.TokenEnv(srv),
-			Allowlist: srv.ToolAllowlist,
-		})
-	}
+func (s *Session) WriteGuestConfig(model config.Model) error {
 	cfg := protocol.GuestConfig{
 		SessionID:  s.ID,
 		Capability: s.Capability,
 		VsockPort:  protocol.RPCPort,
 		RepoDir:    protocol.GuestRepoDir,
 		Model:      model.ToGuest(),
-		MCPServers: gs,
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

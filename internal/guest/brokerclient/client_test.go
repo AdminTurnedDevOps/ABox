@@ -444,6 +444,12 @@ func TestCanceledOpenCancelsLateHostStream(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("canceled open did not return")
 	}
+	c.mu.Lock()
+	pending := len(c.pending)
+	c.mu.Unlock()
+	if pending != 1 {
+		t.Fatalf("canceled open tombstones = %d, want 1", pending)
+	}
 	close(releaseOpen)
 	select {
 	case id := <-canceled:
@@ -452,6 +458,64 @@ func TestCanceledOpenCancelsLateHostStream(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("late provider_open was not canceled")
+	}
+}
+
+func TestCanceledCallTombstoneClearedOnConnectionClose(t *testing.T) {
+	c := New()
+	c.AttachContext(func(context.Context, protocol.Frame) error { return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.call(ctx, "provider_open", protocol.ProviderOpenParams{Model: "g"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v", err)
+	}
+	c.mu.Lock()
+	pending := len(c.pending)
+	c.mu.Unlock()
+	if pending != 1 {
+		t.Fatalf("canceled open tombstones = %d, want 1", pending)
+	}
+
+	c.Close(errors.New("disconnected"))
+	c.mu.Lock()
+	pending = len(c.pending)
+	c.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("connection close retained %d tombstones", pending)
+	}
+}
+
+func TestLateOpenCancelIsIssuedOutsideClientLock(t *testing.T) {
+	c := New()
+	lockFree := make(chan bool, 1)
+	c.AttachContext(func(_ context.Context, frame protocol.Frame) error {
+		if frame.Method != "provider_cancel" {
+			return nil
+		}
+		acquired := c.mu.TryLock()
+		lockFree <- acquired
+		if !acquired {
+			return errors.New("provider_cancel issued while client lock held")
+		}
+		c.mu.Unlock()
+		result, _ := protocol.EncodeParams(map[string]bool{"ok": true})
+		c.HandleFrame(protocol.Frame{ID: frame.ID, Result: result})
+		return nil
+	})
+	result, _ := protocol.EncodeParams(protocol.ProviderOpenResult{StreamID: "s-late"})
+	done := make(chan struct{})
+	go func() {
+		c.cancelOpenedFromFrame(protocol.Frame{Result: result})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider_cancel deadlocked on client lock")
+	}
+	if !<-lockFree {
+		t.Fatal("provider_cancel was issued while client lock held")
 	}
 }
 

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
-	"github.com/AdminTurnedDevOps/ABox/internal/llmbroker"
+	"github.com/AdminTurnedDevOps/ABox/internal/hostbroker"
 	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
 	"github.com/AdminTurnedDevOps/ABox/internal/session"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
@@ -31,12 +32,14 @@ const (
 	modeCredSourcePick
 	modeCredModelPick
 	modeCredName
+	modeApproval
 )
 
 type model struct {
 	cfg            config.File
 	sel            config.Model
 	sandbox        *runtime.Sandbox
+	hostBroker     *hostbroker.Broker
 	ta             textarea.Model
 	keyIn          textinput.Model
 	mode           uiMode
@@ -60,11 +63,23 @@ type model struct {
 	selKeyStatus   string
 	provKeyStatus  map[string]string
 	mcpKeyStatus   map[string]string
+	approvalReq    *runCommandApprovalRequest
+	approvalAllow  bool
+	approvals      chan *runCommandApprovalRequest
 }
 
 type evMsg protocol.AgentEvent
 type errMsg error
 type doneMsg struct{}
+type approvalMsg struct{ req *runCommandApprovalRequest }
+type approvalCanceledMsg struct{ req *runCommandApprovalRequest }
+
+type runCommandApprovalRequest struct {
+	ctx      context.Context
+	params   protocol.RunCommandApprovalParams
+	response chan protocol.ApprovalDecision
+	settled  chan struct{}
+}
 
 // Presence is cached: the render path must not shell out to keychain or HTTP.
 type credStatusMsg struct {
@@ -74,7 +89,7 @@ type credStatusMsg struct {
 	partial bool
 }
 
-func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string, log []string, transcriptPath string) model {
+func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, broker *hostbroker.Broker, vmState string, log []string, transcriptPath string) model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask ABox Anything"
 	ta.Focus()
@@ -89,11 +104,15 @@ func New(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string,
 	ki.EchoCharacter = '•'
 	ki.Placeholder = "paste API key"
 	ki.Prompt = "key> "
-	return model{cfg: cfg, sel: sel, sandbox: sb, ta: ta, keyIn: ki, vmState: vmState, log: log, transcriptPath: transcriptPath}
+	return model{
+		cfg: cfg, sel: sel, sandbox: sb, hostBroker: broker, ta: ta, keyIn: ki,
+		vmState: vmState, log: log, transcriptPath: transcriptPath,
+		approvals: make(chan *runCommandApprovalRequest),
+	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, checkCredStatus(m.cfg, m.sel, m.resolver, false))
+	return tea.Batch(textarea.Blink, checkCredStatus(m.cfg, m.sel, m.resolver, false), waitApproval(m.approvals))
 }
 
 func checkCredStatus(cfg config.File, sel config.Model, r *credsource.Resolver, mcp bool) tea.Cmd {
@@ -140,6 +159,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
+			if m.mode == modeApproval {
+				m.resolveApproval(protocol.ApprovalDeny)
+				if m.cancel != nil {
+					m.cancel()
+				}
+				return m, tea.Quit
+			}
 			if m.mode != modeChat {
 				m.cancelCredInput()
 				m.mode = modeChat
@@ -155,6 +181,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+d":
 			return m, tea.Quit
 		case "esc":
+			if m.mode == modeApproval {
+				m.resolveApproval(protocol.ApprovalDeny)
+				return m, waitApproval(m.approvals)
+			}
 			if m.mode != modeChat {
 				m.cancelCredInput()
 				m.mode = modeChat
@@ -210,6 +240,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "k":
+			if m.mode == modeApproval {
+				m.approvalAllow = false
+				return m, nil
+			}
 			if m.mode == modeMCPPick {
 				if m.mcpSel > 0 {
 					m.mcpSel--
@@ -229,6 +263,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "j":
+			if m.mode == modeApproval {
+				m.approvalAllow = true
+				return m, nil
+			}
 			if m.mode == modeMCPPick {
 				if m.mcpSel < len(mcpServers(m.cfg))-1 {
 					m.mcpSel++
@@ -247,7 +285,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+		case "left":
+			if m.mode == modeApproval {
+				m.approvalAllow = false
+				return m, nil
+			}
+		case "right":
+			if m.mode == modeApproval {
+				m.approvalAllow = true
+				return m, nil
+			}
 		case "enter", "ctrl+m":
+			if m.mode == modeApproval {
+				decision := protocol.ApprovalDeny
+				if m.approvalAllow {
+					decision = protocol.ApprovalAllowOnce
+				}
+				m.resolveApproval(decision)
+				return m, waitApproval(m.approvals)
+			}
 			if m.busy {
 				return m, nil
 			}
@@ -316,6 +372,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.saveTranscript()
 		return m, nil
+	case approvalMsg:
+		if msg.req.ctx.Err() != nil {
+			m.resolveRequest(msg.req, protocol.ApprovalDeny)
+			return m, waitApproval(m.approvals)
+		}
+		m.approvalReq = msg.req
+		m.approvalAllow = false
+		m.mode = modeApproval
+		m.ta.Blur()
+		return m, waitApprovalCancellation(msg.req)
+	case approvalCanceledMsg:
+		if m.approvalReq == msg.req {
+			m.resolveApproval(protocol.ApprovalDeny)
+			return m, waitApproval(m.approvals)
+		}
+		return m, nil
 	}
 	if m.mode == modeProviderKey || m.mode == modeMCPKey || m.mode == modeCredName {
 		var cmd tea.Cmd
@@ -359,7 +431,12 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	ch := make(chan protocol.AgentEvent, 32)
 	m.events = ch
 	go func() {
-		_ = m.sandbox.UserTurn(ctx, text, func(e protocol.AgentEvent) { ch <- e })
+		_, _ = m.sandbox.UserTurnCtx(ctx, text, runtime.TurnOptions{}, func(e protocol.AgentEvent) {
+			select {
+			case ch <- e:
+			case <-ctx.Done():
+			}
+		})
 		close(ch)
 	}()
 	return m, waitEvent(ch)
@@ -470,12 +547,12 @@ func (m model) saveCloudCredential() (tea.Model, tea.Cmd) {
 	}
 	m.cfg = cfg
 	if m.sandbox != nil {
-		m.updateHostBroker(cfg)
 		if err := m.sandbox.SetModel(context.Background(), sel, nil); err != nil {
 			m.err = "saved on host but guest agent update failed: " + err.Error()
 			return m, nil
 		}
 	}
+	m.updateHostBroker(cfg, sel)
 	m.sel = sel
 	m.err = ""
 	m.log = append(m.log, "credential "+m.provPick.Label+" -> "+m.credSource.Label+" "+name+"  ("+note+")")
@@ -530,11 +607,18 @@ func (m model) saveMCPKey() (tea.Model, tea.Cmd) {
 	}
 	m.cfg = cfg
 	m.mcpKeyStatus = map[string]string{m.mcpPick.Name: "key ok"}
-	if m.sandbox != nil {
-		if err := m.sandbox.SetMCPTokens(context.Background(), map[string]string{env: key}); err != nil {
-			m.err = "saved on host but guest MCP update failed: " + err.Error()
+	if m.hostBroker != nil {
+		if err := m.hostBroker.UpdateMCP(cfg); err != nil {
+			m.err = "saved on host but host MCP update failed: " + err.Error()
 			return m, nil
 		}
+		if err := m.hostBroker.SetMCPTokens(map[string]string{env: key}); err != nil {
+			m.err = "saved on host but host MCP token refresh failed: " + err.Error()
+			return m, nil
+		}
+	} else if m.sandbox != nil {
+		m.err = "saved on host but host MCP broker is unavailable"
+		return m, nil
 	}
 	m.err = ""
 	m.log = append(m.log, "mcp "+m.mcpPick.Name+" token saved ("+note+")  (OAuth: abox mcp login "+m.mcpPick.Name+")")
@@ -559,14 +643,13 @@ func (m model) saveProviderKey() (tea.Model, tea.Cmd) {
 	}
 	m.cfg = cfg
 	if m.sandbox != nil {
-		// Refresh the broker even if the guest update fails so it is not stuck on startup config.
-		m.updateHostBroker(cfg)
 		secrets := map[string]string{m.provPick.Env: key}
 		if err := m.sandbox.SetModel(context.Background(), sel, secrets); err != nil {
 			m.err = "saved on host but guest agent update failed: " + err.Error()
 			return m, nil
 		}
 	}
+	m.updateHostBroker(cfg, sel)
 	m.sel = sel
 	m.selKeyStatus = "key ok"
 	if m.provKeyStatus == nil {
@@ -579,9 +662,75 @@ func (m model) saveProviderKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) updateHostBroker(cfg config.File) {
-	if m.sandbox != nil {
-		m.sandbox.OnGuestCall = llmbroker.New(cfg, m.resolver)
+func (m model) updateHostBroker(cfg config.File, sel config.Model) {
+	if m.hostBroker != nil {
+		m.hostBroker.UpdateModel(cfg, sel)
+	}
+}
+
+func (m model) approveRunCommand(ctx context.Context, params protocol.RunCommandApprovalParams) (protocol.ApprovalDecision, error) {
+	req := &runCommandApprovalRequest{
+		ctx:      ctx,
+		params:   params,
+		response: make(chan protocol.ApprovalDecision, 1),
+		settled:  make(chan struct{}),
+	}
+	select {
+	case m.approvals <- req:
+	case <-ctx.Done():
+		return protocol.ApprovalDeny, ctx.Err()
+	}
+	select {
+	case decision := <-req.response:
+		if ctx.Err() != nil {
+			return protocol.ApprovalDeny, ctx.Err()
+		}
+		return decision, nil
+	case <-ctx.Done():
+		return protocol.ApprovalDeny, ctx.Err()
+	}
+}
+
+func (m *model) resolveApproval(decision protocol.ApprovalDecision) {
+	if m.approvalReq == nil {
+		return
+	}
+	if m.approvalReq.ctx.Err() != nil {
+		decision = protocol.ApprovalDeny
+	}
+	m.resolveRequest(m.approvalReq, decision)
+	m.approvalReq = nil
+	m.approvalAllow = false
+	m.mode = modeChat
+	m.ta.Focus()
+}
+
+func (m *model) resolveRequest(req *runCommandApprovalRequest, decision protocol.ApprovalDecision) {
+	select {
+	case req.response <- decision:
+	default:
+	}
+	select {
+	case <-req.settled:
+	default:
+		close(req.settled)
+	}
+}
+
+func waitApproval(ch <-chan *runCommandApprovalRequest) tea.Cmd {
+	return func() tea.Msg {
+		return approvalMsg{req: <-ch}
+	}
+}
+
+func waitApprovalCancellation(req *runCommandApprovalRequest) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case <-req.ctx.Done():
+			return approvalCanceledMsg{req: req}
+		case <-req.settled:
+			return nil
+		}
 	}
 }
 
@@ -727,6 +876,21 @@ func (m model) View() tea.View {
 		composer = b.String()
 	case modeMCPKey:
 		composer = "Bearer token for " + m.mcpPick.Name + "\n" + m.keyIn.View()
+	case modeApproval:
+		if m.approvalReq != nil {
+			workdir := m.approvalReq.params.WorkDir
+			if workdir == "" {
+				workdir = "."
+			}
+			deny, allow := "[Deny]", " Allow once "
+			if m.approvalAllow {
+				deny, allow = " Deny ", "[Allow once]"
+			}
+			composer = fmt.Sprintf(
+				"Approve run_command?\ncommand: %s\nguest workdir: %s\ntimeout: %ds\n\n%s  %s\nleft/right or j/k select; enter confirms; esc denies",
+				strconv.Quote(m.approvalReq.params.Command), strconv.Quote(workdir), m.approvalReq.params.TimeoutSec, deny, allow,
+			)
+		}
 	default:
 		if m.showingSlash() {
 			var b strings.Builder
@@ -820,12 +984,21 @@ func max(a, b int) int {
 	return b
 }
 
-func Run(cfg config.File, sel config.Model, sb *runtime.Sandbox, vmState string, log []string, resolver *credsource.Resolver, transcriptPath string) error {
+func Run(cfg config.File, sel config.Model, sb *runtime.Sandbox, broker *hostbroker.Broker, vmState string, log []string, resolver *credsource.Resolver, transcriptPath string) error {
 	if resolver == nil {
 		resolver = credsource.NewResolver()
 	}
-	m := New(cfg, sel, sb, vmState, log, transcriptPath)
+	m := New(cfg, sel, sb, broker, vmState, log, transcriptPath)
 	m.resolver = resolver
+	if sb != nil {
+		if broker == nil {
+			return fmt.Errorf("host broker is required when the VM is ready")
+		}
+		sb.SetGuestCallHandler(broker)
+		if err := sb.SetRunCommandApprover(runtime.RunCommandApproverFunc(m.approveRunCommand)); err != nil {
+			return fmt.Errorf("configure run_command approval: %w", err)
+		}
+	}
 	p := tea.NewProgram(m)
 	_, err := p.Run()
 	return err

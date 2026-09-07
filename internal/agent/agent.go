@@ -10,15 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AdminTurnedDevOps/ABox/internal/agentapi"
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
-	"github.com/AdminTurnedDevOps/ABox/internal/guest/mcp"
 	"github.com/AdminTurnedDevOps/ABox/internal/guest/tools"
-	"github.com/AdminTurnedDevOps/ABox/internal/provider"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
 type MCPClient interface {
-	Tools() []mcp.Tool
+	Refresh(context.Context) error
+	Tools() []protocol.MCPTool
 	Call(ctx context.Context, server, tool string, args json.RawMessage) (string, error)
 }
 
@@ -31,20 +31,23 @@ type Loop struct {
 	Model       config.Model
 	Repo        tools.Repo
 	MCP         MCPClient
-	Messages    []provider.Message
+	Messages    []agentapi.Message
 	ContextFile string
 	OnEvent     func(protocol.AgentEvent)
 	MaxTurns    int
 	Rich        bool
+	TurnID      string
 
-	Stream func(ctx context.Context, model config.Model, messages []provider.Message, tools []provider.ToolSchema) (<-chan provider.Event, error)
+	ApproveRunCommand func(context.Context, protocol.RunCommandApprovalParams) (protocol.ApprovalDecision, error)
+
+	Stream func(ctx context.Context, model config.Model, messages []agentapi.Message, tools []agentapi.ToolSchema) (<-chan agentapi.Event, error)
 }
 
-func BuiltinTools() []provider.ToolSchema {
+func BuiltinTools() []agentapi.ToolSchema {
 	specs := tools.BuiltinSpecs()
-	out := make([]provider.ToolSchema, len(specs))
+	out := make([]agentapi.ToolSchema, len(specs))
 	for i, s := range specs {
-		out[i] = provider.ToolSchema{Name: s.Name, Description: s.Description, Parameters: s.Parameters}
+		out[i] = agentapi.ToolSchema{Name: s.Name, Description: s.Description, Parameters: s.Parameters}
 	}
 	return out
 }
@@ -61,7 +64,13 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 		l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
 		return err
 	}
-	l.Messages = append(l.Messages, provider.Message{Role: "user", Content: user})
+	if l.MCP != nil {
+		if err := l.MCP.Refresh(ctx); err != nil {
+			l.emit(protocol.AgentEvent{Kind: "error", Err: err.Error()})
+			return err
+		}
+	}
+	l.Messages = append(l.Messages, agentapi.Message{Role: "user", Content: user})
 	limit := l.MaxTurns
 	if limit <= 0 {
 		limit = 16
@@ -81,7 +90,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 			return err
 		}
 		var text string
-		var tool provider.Event
+		var tool agentapi.Event
 		for ev := range events {
 			switch ev.Type {
 			case "text":
@@ -109,7 +118,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 		}
 		if tool.ToolName == "" {
 			if text != "" {
-				l.Messages = append(l.Messages, provider.Message{Role: "assistant", Content: text})
+				l.Messages = append(l.Messages, agentapi.Message{Role: "assistant", Content: text})
 			}
 			if l.Rich {
 				ev := protocol.AgentEvent{Kind: "result", StopReason: stopReason}
@@ -123,7 +132,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 			_ = l.SaveContext()
 			return nil
 		}
-		l.Messages = append(l.Messages, provider.Message{
+		l.Messages = append(l.Messages, agentapi.Message{
 			Role:     "assistant",
 			ToolID:   tool.ToolID,
 			ToolName: tool.ToolName,
@@ -146,7 +155,7 @@ func (l *Loop) Turn(ctx context.Context, user string) error {
 			}
 			l.emit(tev)
 		}
-		l.Messages = append(l.Messages, provider.Message{
+		l.Messages = append(l.Messages, agentapi.Message{
 			Role:       "tool",
 			ToolID:     tool.ToolID,
 			ToolResult: result,
@@ -183,7 +192,7 @@ func (l *Loop) History() []protocol.HistoryLine {
 	return protocol.TrimHistory(HistoryFromMessages(l.Messages), protocol.MaxHistoryBytes)
 }
 
-func HistoryFromMessages(msgs []provider.Message) []protocol.HistoryLine {
+func HistoryFromMessages(msgs []agentapi.Message) []protocol.HistoryLine {
 	var out []protocol.HistoryLine
 	for _, m := range msgs {
 		switch m.Role {
@@ -215,7 +224,7 @@ func HistoryFromContextJSON(data []byte) ([]protocol.HistoryLine, error) {
 	return HistoryFromMessages(msgs), nil
 }
 
-func SaveMessages(path string, msgs []provider.Message) error {
+func SaveMessages(path string, msgs []agentapi.Message) error {
 	if path == "" {
 		return fmt.Errorf("empty context path")
 	}
@@ -234,7 +243,7 @@ func SaveMessages(path string, msgs []provider.Message) error {
 	return os.Rename(tmp, path)
 }
 
-func LoadMessages(path string) ([]provider.Message, error) {
+func LoadMessages(path string) ([]agentapi.Message, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -242,23 +251,23 @@ func LoadMessages(path string) ([]provider.Message, error) {
 	return ParseMessages(data)
 }
 
-func ParseMessages(data []byte) ([]provider.Message, error) {
+func ParseMessages(data []byte) ([]agentapi.Message, error) {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 {
 		return nil, nil
 	}
-	var msgs []provider.Message
+	var msgs []agentapi.Message
 	if err := json.Unmarshal(data, &msgs); err != nil {
 		return nil, err
 	}
 	return msgs, nil
 }
 
-func trimMessages(msgs []provider.Message, max int) []provider.Message {
+func trimMessages(msgs []agentapi.Message, max int) []agentapi.Message {
 	if max <= 0 {
 		return nil
 	}
-	var out []provider.Message
+	var out []agentapi.Message
 	var size int
 	for i := len(msgs) - 1; i >= 0; i-- {
 		b, err := json.Marshal(msgs[i])
@@ -277,7 +286,7 @@ func trimMessages(msgs []provider.Message, max int) []provider.Message {
 	return out
 }
 
-func (l *Loop) allTools() []provider.ToolSchema {
+func (l *Loop) allTools() []agentapi.ToolSchema {
 	tools := BuiltinTools()
 	if l.MCP == nil {
 		return tools
@@ -291,7 +300,7 @@ func (l *Loop) allTools() []provider.ToolSchema {
 		if t.Server != "" {
 			desc = "[" + t.Server + "] " + desc
 		}
-		tools = append(tools, provider.ToolSchema{
+		tools = append(tools, agentapi.ToolSchema{
 			Name:        name,
 			Description: desc,
 			Parameters:  t.Parameters,
@@ -308,7 +317,7 @@ func splitMCPName(name string) (server, tool string, ok bool) {
 	return server, tool, true
 }
 
-func (l *Loop) execTool(ctx context.Context, ev provider.Event) (string, error) {
+func (l *Loop) execTool(ctx context.Context, ev agentapi.Event) (string, error) {
 	if server, tool, ok := splitMCPName(ev.ToolName); ok {
 		if l.MCP == nil {
 			return "", fmt.Errorf("mcp is not configured")
@@ -319,7 +328,36 @@ func (l *Loop) execTool(ctx context.Context, ev provider.Event) (string, error) 
 	if deadline, ok := ctx.Deadline(); ok {
 		timeout = time.Until(deadline)
 	}
-	result, err := l.Repo.CallToolCtx(ctx, ev.ToolName, json.RawMessage(ev.ToolArgs), timeout)
+	approve := func(ctx context.Context, p protocol.RunCommandParams, effective time.Duration) error {
+		pending := protocol.AgentEvent{Kind: "approval", Tool: tools.RunCommand, Status: "pending"}
+		if l.Rich {
+			pending.ToolID = ev.ToolID
+			pending.ToolArgs = ev.ToolArgs
+		}
+		l.emit(pending)
+		if l.ApproveRunCommand == nil {
+			l.emit(protocol.AgentEvent{Kind: "approval", Tool: tools.RunCommand, Status: "denied", ToolID: ev.ToolID})
+			return fmt.Errorf("run_command denied: no approval policy is configured")
+		}
+		seconds := int(effective / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		decision, err := l.ApproveRunCommand(ctx, protocol.RunCommandApprovalParams{
+			TurnID: l.TurnID, ToolID: ev.ToolID, Command: p.Command, WorkDir: p.WorkDir, TimeoutSec: seconds,
+		})
+		if err != nil {
+			l.emit(protocol.AgentEvent{Kind: "approval", Tool: tools.RunCommand, Status: "denied", ToolID: ev.ToolID})
+			return fmt.Errorf("run_command denied: %w", err)
+		}
+		if decision != protocol.ApprovalAllowOnce {
+			l.emit(protocol.AgentEvent{Kind: "approval", Tool: tools.RunCommand, Status: "denied", ToolID: ev.ToolID})
+			return fmt.Errorf("run_command denied")
+		}
+		l.emit(protocol.AgentEvent{Kind: "approval", Tool: tools.RunCommand, Status: "allowed", ToolID: ev.ToolID})
+		return nil
+	}
+	result, err := l.Repo.CallApprovedToolCtx(ctx, ev.ToolName, json.RawMessage(ev.ToolArgs), timeout, approve)
 	return tools.FormatToolResult(result, err)
 }
 

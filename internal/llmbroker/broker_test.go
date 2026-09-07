@@ -151,6 +151,15 @@ func defaultCfg() config.File {
 	return cfg
 }
 
+func newBroker(t *testing.T, cfg config.File, alias string, resolver *credsource.Resolver) *Broker {
+	t.Helper()
+	model, ok := cfg.ModelNamed(alias)
+	if !ok {
+		t.Fatalf("model %q not found in test config", alias)
+	}
+	return New(cfg, model, resolver)
+}
+
 func TestBrokerStreamsOpenAITextHostAuth(t *testing.T) {
 	srv, authSeen := sseProvider(t, "openai", func(w http.ResponseWriter, auth, body string) {
 		if !strings.HasPrefix(auth, "Bearer k1") {
@@ -169,7 +178,7 @@ func TestBrokerStreamsOpenAITextHostAuth(t *testing.T) {
 	r.Register("rot", &rotatingSource{vals: []string{"k1"}})
 	cfg.Models[1].CredentialEnv = ""
 	cfg.Models[1].Credential = &config.CredentialRef{Source: "rot", Name: "openai"}
-	b := New(cfg, r).WithHTTPClient(srv.Client())
+	b := newBroker(t, cfg, "openai-default", r).WithHTTPClient(srv.Client())
 
 	rec := &notifyRecorder{}
 	id := openStream(t, b, "openai-default")
@@ -206,7 +215,7 @@ func TestBrokerAnthropicKeyHeader(t *testing.T) {
 	r.Register("rot", &rotatingSource{vals: []string{"k-ant"}})
 	cfg.Models[2].CredentialEnv = ""
 	cfg.Models[2].Credential = &config.CredentialRef{Source: "rot", Name: "anthropic"}
-	b := New(cfg, r).WithHTTPClient(srv.Client())
+	b := newBroker(t, cfg, "claude-default", r).WithHTTPClient(srv.Client())
 
 	rec := &notifyRecorder{}
 	id := openStream(t, b, "claude-default")
@@ -223,11 +232,61 @@ func TestBrokerAnthropicKeyHeader(t *testing.T) {
 }
 
 func TestBrokerUnknownAliasRejected(t *testing.T) {
-	b := New(defaultCfg(), credsource.NewResolver())
+	b := newBroker(t, defaultCfg(), "openai-default", credsource.NewResolver())
 	_, perr := b.Handle(context.Background(), "provider_open", mustJSON(t, providerOpenJSON("nope")), nil)
-	if perr == nil || !strings.Contains(perr.Message, "unknown model profile") {
+	if perr == nil || !strings.Contains(perr.Message, "not selected") {
 		t.Fatalf("got %+v", perr)
 	}
+}
+
+func TestBrokerOpenScopedToSelectedModel(t *testing.T) {
+	cfg := defaultCfg()
+	b := newBroker(t, cfg, "openai-default", credsource.NewResolver())
+
+	_, perr := b.Handle(context.Background(), "provider_open", mustJSON(t, providerOpenJSON("grok-default")), nil)
+	if perr == nil || !strings.Contains(perr.Message, "not selected") {
+		t.Fatalf("global but unselected alias was accepted: %+v", perr)
+	}
+	id := openStream(t, b, "openai-default")
+	b.mu.Lock()
+	st := b.streams[id]
+	b.mu.Unlock()
+	b.finish(st)
+}
+
+func TestBrokerUpdateModelPreservesStreamsAndLimit(t *testing.T) {
+	cfg := defaultCfg()
+	b := newBroker(t, cfg, "openai-default", credsource.NewResolver())
+	firstID := openStream(t, b, "openai-default")
+
+	grok, ok := cfg.ModelNamed("grok-default")
+	if !ok {
+		t.Fatal("grok-default missing from test config")
+	}
+	b.UpdateModel(cfg, grok)
+
+	b.mu.Lock()
+	first := b.streams[firstID]
+	b.mu.Unlock()
+	if first == nil || first.model.Name != "openai-default" {
+		t.Fatalf("existing stream model changed: %+v", first)
+	}
+	if _, perr := b.Handle(context.Background(), "provider_open", mustJSON(t, providerOpenJSON("openai-default")), nil); perr == nil {
+		t.Fatal("previously selected model remained available")
+	}
+	secondID := openStream(t, b, "grok-default")
+	if _, perr := b.Handle(context.Background(), "provider_open", mustJSON(t, providerOpenJSON("grok-default")), nil); perr == nil || !strings.Contains(perr.Message, "too many") {
+		t.Fatalf("stream limit did not survive update: %+v", perr)
+	}
+
+	b.finish(first)
+	thirdID := openStream(t, b, "grok-default")
+	b.mu.Lock()
+	second := b.streams[secondID]
+	third := b.streams[thirdID]
+	b.mu.Unlock()
+	b.finish(second)
+	b.finish(third)
 }
 
 func providerOpenJSON(name string) protocol.ProviderOpenParams {
@@ -237,7 +296,7 @@ func providerOpenJSON(name string) protocol.ProviderOpenParams {
 func TestBrokerOfflineRejected(t *testing.T) {
 	cfg := defaultCfg()
 	cfg.Connectivity.Mode = "offline"
-	b := New(cfg, credsource.NewResolver())
+	b := newBroker(t, cfg, "openai-default", credsource.NewResolver())
 	_, perr := b.Handle(context.Background(), "provider_open", mustJSON(t, providerOpenJSON("openai-default")), nil)
 	if perr == nil || !strings.Contains(perr.Message, "offline") {
 		t.Fatalf("got %+v", perr)
@@ -245,7 +304,7 @@ func TestBrokerOfflineRejected(t *testing.T) {
 }
 
 func TestBrokerUnknownStreamRejected(t *testing.T) {
-	b := New(defaultCfg(), credsource.NewResolver())
+	b := newBroker(t, defaultCfg(), "openai-default", credsource.NewResolver())
 	_, perr := b.Handle(context.Background(), "provider_send", mustJSON(t, protocol.ProviderSendParams{StreamID: "s99", Last: true}), nil)
 	if perr == nil || !strings.Contains(perr.Message, "unknown provider stream") {
 		t.Fatalf("got %+v", perr)
@@ -255,7 +314,7 @@ func TestBrokerUnknownStreamRejected(t *testing.T) {
 func TestBrokerChunkBudgetRejected(t *testing.T) {
 	cfg := defaultCfg()
 	r := credsource.NewResolver()
-	b := New(cfg, r)
+	b := newBroker(t, cfg, "openai-default", r)
 	id := openStream(t, b, "openai-default")
 	remaining := protocol.MaxProviderRequest - 4
 	for remaining > 0 {
@@ -276,7 +335,7 @@ func TestBrokerChunkBudgetRejected(t *testing.T) {
 }
 
 func TestBrokerRejectsOversizedChunkAndCleansStream(t *testing.T) {
-	b := New(defaultCfg(), credsource.NewResolver())
+	b := newBroker(t, defaultCfg(), "openai-default", credsource.NewResolver())
 	id := openStream(t, b, "openai-default")
 	_, perr := sendChunk(t, b, &notifyRecorder{}, id, make([]byte, protocol.MaxProviderChunk+1), false)
 	if perr == nil || !strings.Contains(perr.Message, "chunk too large") {
@@ -299,7 +358,7 @@ func TestBrokerLastStartsProviderExactlyOnce(t *testing.T) {
 	r.Register("rot", &rotatingSource{vals: []string{"key"}})
 	cfg.Models[1].CredentialEnv = ""
 	cfg.Models[1].Credential = &config.CredentialRef{Source: "rot", Name: "openai"}
-	b := New(cfg, r).WithHTTPClient(srv.Client())
+	b := newBroker(t, cfg, "openai-default", r).WithHTTPClient(srv.Client())
 	rec := &notifyRecorder{}
 	id := openStream(t, b, "openai-default")
 	body, _ := json.Marshal(protocol.ProviderRequest{Messages: []protocol.ProviderMessage{{Role: "user", Content: "q"}}})
@@ -326,7 +385,7 @@ func TestBrokerRejectsDataAfterStart(t *testing.T) {
 	r.Register("rot", &rotatingSource{vals: []string{"key"}})
 	cfg.Models[1].CredentialEnv = ""
 	cfg.Models[1].Credential = &config.CredentialRef{Source: "rot", Name: "openai"}
-	b := New(cfg, r).WithHTTPClient(srv.Client())
+	b := newBroker(t, cfg, "openai-default", r).WithHTTPClient(srv.Client())
 	id := openStream(t, b, "openai-default")
 	body, _ := json.Marshal(protocol.ProviderRequest{})
 	if _, perr := sendChunk(t, b, &notifyRecorder{}, id, body, true); perr != nil {
@@ -338,7 +397,7 @@ func TestBrokerRejectsDataAfterStart(t *testing.T) {
 }
 
 func TestBrokerRequestCountBounds(t *testing.T) {
-	b := New(defaultCfg(), credsource.NewResolver())
+	b := newBroker(t, defaultCfg(), "openai-default", credsource.NewResolver())
 	id := openStream(t, b, "openai-default")
 	req := protocol.ProviderRequest{Messages: make([]protocol.ProviderMessage, protocol.MaxProviderMessages+1)}
 	body, _ := json.Marshal(req)
@@ -349,7 +408,7 @@ func TestBrokerRequestCountBounds(t *testing.T) {
 }
 
 func TestBrokerToolCountBounds(t *testing.T) {
-	b := New(defaultCfg(), credsource.NewResolver())
+	b := newBroker(t, defaultCfg(), "openai-default", credsource.NewResolver())
 	id := openStream(t, b, "openai-default")
 	req := protocol.ProviderRequest{Tools: make([]protocol.ProviderToolSchema, protocol.MaxProviderTools+1)}
 	body, _ := json.Marshal(req)
@@ -370,7 +429,7 @@ func TestBrokerRejectsOversizedProviderEvent(t *testing.T) {
 	r.Register("rot", &rotatingSource{vals: []string{"key"}})
 	cfg.Models[1].CredentialEnv = ""
 	cfg.Models[1].Credential = &config.CredentialRef{Source: "rot", Name: "openai"}
-	b := New(cfg, r).WithHTTPClient(srv.Client())
+	b := newBroker(t, cfg, "openai-default", r).WithHTTPClient(srv.Client())
 	rec := &notifyRecorder{}
 	id := openStream(t, b, "openai-default")
 	body, _ := json.Marshal(protocol.ProviderRequest{})
@@ -414,7 +473,7 @@ func TestBrokerDrainsProviderAfterNotifyFailure(t *testing.T) {
 }
 
 func TestBrokerOpenContextClosesReceivingStream(t *testing.T) {
-	b := New(defaultCfg(), credsource.NewResolver())
+	b := newBroker(t, defaultCfg(), "openai-default", credsource.NewResolver())
 	ctx, cancel := context.WithCancel(context.Background())
 	res, perr := b.Handle(ctx, "provider_open", mustJSON(t, protocol.ProviderOpenParams{Model: "openai-default"}), nil)
 	if perr != nil {
@@ -451,7 +510,7 @@ func TestBrokerCredentialResolvedPerCall(t *testing.T) {
 	r.Register("rot", rot)
 	cfg.Models[1].CredentialEnv = ""
 	cfg.Models[1].Credential = &config.CredentialRef{Source: "rot", Name: "openai"}
-	b := New(cfg, r).WithHTTPClient(srv.Client())
+	b := newBroker(t, cfg, "openai-default", r).WithHTTPClient(srv.Client())
 
 	for i := 0; i < 2; i++ {
 		rec := &notifyRecorder{}
@@ -480,7 +539,7 @@ func TestBrokerMissingCredentialTypedError(t *testing.T) {
 	r.Register("rot", &rotatingSource{vals: nil})
 	cfg.Models[1].CredentialEnv = ""
 	cfg.Models[1].Credential = &config.CredentialRef{Source: "rot", Name: "openai"}
-	b := New(cfg, r)
+	b := newBroker(t, cfg, "openai-default", r)
 	id := openStream(t, b, "openai-default")
 	raw, _ := json.Marshal(protocol.ProviderRequest{})
 	_, perr := sendChunk(t, b, &notifyRecorder{}, id, raw, true)
@@ -508,7 +567,7 @@ func TestBrokerCancelAbortsHTTP(t *testing.T) {
 	r.Register("rot", &rotatingSource{vals: []string{"k"}})
 	cfg.Models[1].CredentialEnv = ""
 	cfg.Models[1].Credential = &config.CredentialRef{Source: "rot", Name: "openai"}
-	b := New(cfg, r).WithHTTPClient(srv.Client())
+	b := newBroker(t, cfg, "openai-default", r).WithHTTPClient(srv.Client())
 
 	rec := &notifyRecorder{}
 	id := openStream(t, b, "openai-default")
@@ -533,7 +592,7 @@ func TestBrokerCancelAbortsHTTP(t *testing.T) {
 func TestBrokerToolArgsBound(t *testing.T) {
 	cfg := defaultCfg()
 	r := credsource.NewResolver()
-	b := New(cfg, r)
+	b := newBroker(t, cfg, "openai-default", r)
 	id := openStream(t, b, "openai-default")
 	req := protocol.ProviderRequest{Messages: []protocol.ProviderMessage{{
 		Role: "assistant", ToolName: "x", ToolArgs: strings.Repeat("a", protocol.MaxProviderToolArgs+1),
@@ -553,7 +612,7 @@ func TestBrokerToolArgsBound(t *testing.T) {
 }
 
 func TestBrokerUnknownMethodTypedError(t *testing.T) {
-	b := New(defaultCfg(), credsource.NewResolver())
+	b := newBroker(t, defaultCfg(), "openai-default", credsource.NewResolver())
 	_, perr := b.Handle(context.Background(), "fetch_url", []byte(`{}`), nil)
 	if perr == nil || !strings.Contains(perr.Message, "unknown broker method") {
 		t.Fatalf("got %+v", perr)
@@ -562,10 +621,10 @@ func TestBrokerUnknownMethodTypedError(t *testing.T) {
 
 func TestBrokerMaxConcurrentStreams(t *testing.T) {
 	cfg := defaultCfg()
-	b := New(cfg, credsource.NewResolver())
+	b := newBroker(t, cfg, "openai-default", credsource.NewResolver())
 	first := openStream(t, b, "openai-default")
-	second := openStream(t, b, "grok-default")
-	_, perr := b.Handle(context.Background(), "provider_open", mustJSON(t, providerOpenJSON("claude-default")), nil)
+	second := openStream(t, b, "openai-default")
+	_, perr := b.Handle(context.Background(), "provider_open", mustJSON(t, providerOpenJSON("openai-default")), nil)
 	if perr == nil || !strings.Contains(perr.Message, "too many open provider streams") {
 		t.Fatalf("got %+v", perr)
 	}

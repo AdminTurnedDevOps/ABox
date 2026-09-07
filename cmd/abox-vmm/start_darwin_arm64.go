@@ -35,8 +35,8 @@ func startVM(cfg vmmconfig.Config) error {
 	if rc := C.krun_disable_implicit_vsock(id); rc < 0 {
 		return fmt.Errorf("krun_disable_implicit_vsock: %d", int(rc))
 	}
-	if rc := C.krun_add_vsock(id, C.KRUN_TSI_HIJACK_INET); rc < 0 {
-		return fmt.Errorf("krun_add_vsock(TSI_INET): %d", int(rc))
+	if rc := C.krun_add_vsock(id, 0); rc < 0 {
+		return fmt.Errorf("krun_add_vsock: %d", int(rc))
 	}
 
 	sock := C.CString(cfg.RPCSocket)

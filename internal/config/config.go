@@ -282,6 +282,11 @@ func (s MCPServer) validate() error {
 }
 
 func (m Model) validate() error {
+	if m.BaseURL != "" {
+		if err := validateHTTPSURL("base_url", m.BaseURL); err != nil {
+			return err
+		}
+	}
 	if m.CredentialEnv != "" && m.Credential != nil {
 		return fmt.Errorf("set either credential or credential_env, not both")
 	}

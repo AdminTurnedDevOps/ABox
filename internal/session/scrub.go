@@ -12,8 +12,8 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 )
 
-// ScrubSecrets removes the "secrets" key from guest-config.json and
-// config.raw. It never deletes sessions.
+// ScrubSecrets removes legacy credentials and MCP endpoint policy from guest
+// configuration artifacts. It never deletes sessions.
 func ScrubSecrets(root string) (int, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -144,10 +144,13 @@ func scrubbedJSONObject(data []byte) ([]byte, error) {
 	if obj == nil {
 		return nil, fmt.Errorf("expected JSON object")
 	}
-	if _, ok := obj["secrets"]; !ok {
+	_, hasSecrets := obj["secrets"]
+	_, hasMCP := obj["mcp_servers"]
+	if !hasSecrets && !hasMCP {
 		return nil, nil
 	}
 	delete(obj, "secrets")
+	delete(obj, "mcp_servers")
 	out, err := json.MarshalIndent(obj, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("scrub: %w", err)

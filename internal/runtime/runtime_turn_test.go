@@ -27,7 +27,7 @@ func TestUserTurnCtxRejectsV1ForRich(t *testing.T) {
 func TestUserTurnPlainOnPipe(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, GuestProtocol: 2}
+	s := &Sandbox{conn: host, GuestProtocol: 4}
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -64,7 +64,7 @@ func TestUserTurnPlainOnPipe(t *testing.T) {
 func TestUserTurnDoesNotDropBurstFrames(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, GuestProtocol: 2}
+	s := &Sandbox{conn: host, GuestProtocol: 4}
 
 	const eventCount = 200
 	written := make(chan error, 1)
@@ -129,7 +129,7 @@ func TestFrameQueueBudgets(t *testing.T) {
 func TestUserTurnQueueOverflowFailsClearly(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, GuestProtocol: 2}
+	s := &Sandbox{conn: host, GuestProtocol: 4}
 
 	guestDone := make(chan error, 1)
 	go func() {
@@ -180,7 +180,7 @@ func TestUserTurnQueueOverflowFailsClearly(t *testing.T) {
 func TestCallWriteHonorsContextUnderBackpressure(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, GuestProtocol: 2}
+	s := &Sandbox{conn: host, GuestProtocol: 4}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
@@ -200,7 +200,7 @@ func TestCallWriteHonorsContextUnderBackpressure(t *testing.T) {
 func TestUserTurnCtxCancelWritesCancelTurn(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, GuestProtocol: 2}
+	s := &Sandbox{conn: host, GuestProtocol: 4}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan string, 1)
@@ -238,7 +238,7 @@ func TestUserTurnCtxCancelWritesCancelTurn(t *testing.T) {
 func TestUserTurnCtxDeadlineWaitsForCanceledResponse(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, GuestProtocol: 2}
+	s := &Sandbox{conn: host, GuestProtocol: 4}
 
 	guestDone := make(chan error, 1)
 	go func() {
@@ -281,7 +281,7 @@ func TestUserTurnCtxDeadlineWaitsForCanceledResponse(t *testing.T) {
 func TestUserTurnCtxForwardsOptionsAndResult(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, GuestProtocol: 2}
+	s := &Sandbox{conn: host, GuestProtocol: 4}
 
 	guestDone := make(chan error, 1)
 	go func() {
@@ -331,7 +331,7 @@ func TestUserTurnCtxForwardsOptionsAndResult(t *testing.T) {
 func TestCallSkipsLateCancelResponse(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, GuestProtocol: 2}
+	s := &Sandbox{conn: host, GuestProtocol: 4}
 	var guestWriteMu sync.Mutex
 	writeGuest := func(frame protocol.Frame) error {
 		guestWriteMu.Lock()

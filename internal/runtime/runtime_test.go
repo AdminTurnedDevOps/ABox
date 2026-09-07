@@ -42,7 +42,7 @@ func TestPrepareResumeDoesNotClobberRoot(t *testing.T) {
 	if err := os.WriteFile(golden, []byte("GOLDEN"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = Prepare(s, golden, config.Model{Name: "grok", Provider: "xai", Model: "grok-4"}, nil, true)
+	err = Prepare(s, golden, config.Model{Name: "grok", Provider: "xai", Model: "grok-4"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestPrepareResumeRewritesReadOnlyConfig(t *testing.T) {
 	if err := os.WriteFile(s.ConfigDisk(), make([]byte, 1<<20), 0o400); err != nil {
 		t.Fatal(err)
 	}
-	err = Prepare(s, "", config.Model{Name: "grok", Provider: "xai", Model: "grok-4"}, nil, true)
+	err = Prepare(s, "", config.Model{Name: "grok", Provider: "xai", Model: "grok-4"}, true)
 	if err != nil {
 		t.Fatal(err)
 	}

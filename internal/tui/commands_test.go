@@ -9,7 +9,7 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credsource"
-	"github.com/AdminTurnedDevOps/ABox/internal/runtime"
+	"github.com/AdminTurnedDevOps/ABox/internal/hostbroker"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
@@ -183,13 +183,20 @@ func TestApplyCloudCredentialAddsMissingProfile(t *testing.T) {
 
 func TestUpdateHostBrokerUsesCurrentModelConfig(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.Models = []config.Model{{
+	initial := cfg.Models[0]
+	updated := config.Model{
 		Name: "updated", Provider: "openai", Model: "gpt-current", CredentialEnv: "CURRENT_API_KEY",
-	}}
-	sb := &runtime.Sandbox{}
-	m := model{sandbox: sb, resolver: credsource.NewResolver()}
-	t.Cleanup(func() { _ = m.resolver.Close() })
-	m.updateHostBroker(cfg)
+	}
+	cfg.Models = []config.Model{updated}
+	resolver := credsource.NewResolver()
+	t.Cleanup(func() { _ = resolver.Close() })
+	broker, err := hostbroker.New(config.Defaults(), initial, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	m := model{hostBroker: broker}
+	m.updateHostBroker(cfg, updated)
 
 	raw, err := json.Marshal(protocol.ProviderOpenParams{Model: "updated"})
 	if err != nil {
@@ -197,7 +204,7 @@ func TestUpdateHostBrokerUsesCurrentModelConfig(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if _, perr := sb.OnGuestCall.Handle(ctx, "provider_open", raw, nil); perr != nil {
+	if _, perr := broker.Handle(ctx, "provider_open", raw, nil); perr != nil {
 		t.Fatalf("updated broker rejected current model: %v", perr)
 	}
 }

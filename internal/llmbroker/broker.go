@@ -22,14 +22,15 @@ import (
 const idleTimeout = 5 * time.Minute
 
 type Broker struct {
-	cfg      config.File
 	resolver *credsource.Resolver
 	client   *http.Client
 	logf     func(format string, args ...any)
 
-	mu      sync.Mutex
-	next    int
-	streams map[string]*stream
+	mu               sync.Mutex
+	connectivityMode string
+	model            config.Model
+	next             int
+	streams          map[string]*stream
 }
 
 type streamState uint8
@@ -53,13 +54,23 @@ type stream struct {
 	bytesIn   int
 }
 
-func New(cfg config.File, resolver *credsource.Resolver) *Broker {
+func New(cfg config.File, model config.Model, resolver *credsource.Resolver) *Broker {
 	return &Broker{
-		cfg:      cfg,
-		resolver: resolver,
-		client:   &http.Client{Timeout: 5 * time.Minute},
-		streams:  map[string]*stream{},
+		connectivityMode: cfg.Connectivity.Mode,
+		model:            model,
+		resolver:         resolver,
+		client:           &http.Client{Timeout: 5 * time.Minute},
+		streams:          map[string]*stream{},
 	}
+}
+
+// UpdateModel changes the model available to future opens. Existing streams
+// retain the model they opened with and continue to count toward the limit.
+func (b *Broker) UpdateModel(cfg config.File, model config.Model) {
+	b.mu.Lock()
+	b.connectivityMode = cfg.Connectivity.Mode
+	b.model = model
+	b.mu.Unlock()
 }
 
 func (b *Broker) WithHTTPClient(c *http.Client) *Broker {
@@ -97,19 +108,21 @@ func (b *Broker) open(parent context.Context, raw json.RawMessage) (any, *protoc
 	if err != nil {
 		return nil, &protocol.Error{Code: "host", Message: err.Error()}
 	}
-	if b.cfg.Connectivity.Mode == "offline" {
-		return nil, &protocol.Error{Code: "host", Message: "offline mode: provider access is disabled"}
-	}
 	if strings.TrimSpace(p.Model) == "" {
 		return nil, &protocol.Error{Code: "host", Message: "model alias required"}
 	}
-	model, ok := b.cfg.ModelNamed(p.Model)
-	if !ok {
-		return nil, &protocol.Error{Code: "host", Message: fmt.Sprintf("unknown model profile %q", p.Model)}
-	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	if b.connectivityMode == "offline" {
+		b.mu.Unlock()
+		return nil, &protocol.Error{Code: "host", Message: "offline mode: provider access is disabled"}
+	}
+	model := b.model
+	if p.Model != model.Name {
+		b.mu.Unlock()
+		return nil, &protocol.Error{Code: "host", Message: fmt.Sprintf("model profile %q is not selected for this session", p.Model)}
+	}
 	if len(b.streams) >= protocol.MaxProviderStreams {
+		b.mu.Unlock()
 		return nil, &protocol.Error{Code: "host", Message: "too many open provider streams"}
 	}
 	b.next++
@@ -118,6 +131,7 @@ func (b *Broker) open(parent context.Context, raw json.RawMessage) (any, *protoc
 	st := &stream{id: id, model: model, rich: p.Rich, state: streamReceiving, ctx: ctx, cancel: cancel}
 	st.idleTimer = time.AfterFunc(idleTimeout, cancel)
 	b.streams[id] = st
+	b.mu.Unlock()
 	b.log("provider stream %s opened (model=%s rich=%v)", id, p.Model, p.Rich)
 	go func() {
 		<-ctx.Done()
