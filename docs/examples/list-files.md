@@ -16,7 +16,7 @@ No model call. Same RPC as `abox --probe-vm` (path `.`, depth 4, limit 50).
 
 ```bash
 abox --probe-vm
-abox --resume --probe-vm      # existing disk; still no model
+abox --resume <id> --probe-vm # existing disk; still no model
 ```
 
 No provider key. `--probe-vm` is also the only CLI path that still talks to a

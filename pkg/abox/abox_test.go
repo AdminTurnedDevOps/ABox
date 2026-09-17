@@ -126,39 +126,9 @@ func TestOpenReturnsLegacySessionScrubError(t *testing.T) {
 	}
 }
 
-func TestLoadResumeByID(t *testing.T) {
-	t.Setenv("ABOX_HOME", t.TempDir())
-	created, err := session.Create(t.TempDir(), "head")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(created.RootDisk(), []byte("disk"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := loadResume("ignored", created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.ID != created.ID {
-		t.Fatalf("id %q", got.ID)
-	}
-}
-
-func TestLoadResumeLatestForRepo(t *testing.T) {
-	t.Setenv("ABOX_HOME", t.TempDir())
-	repo := t.TempDir()
-	created, err := session.Create(repo, "head")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(created.RootDisk(), []byte("disk"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := loadResume(filepath.Join(repo, "."), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.ID != created.ID {
-		t.Fatalf("id %q", got.ID)
+func TestResumeRequiresSessionID(t *testing.T) {
+	sess, err := Resume(context.Background(), "", Options{})
+	if sess != nil || err == nil || !strings.Contains(err.Error(), "session ID is required") {
+		t.Fatalf("session=%v err=%v", sess, err)
 	}
 }

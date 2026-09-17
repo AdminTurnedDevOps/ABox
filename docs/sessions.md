@@ -19,13 +19,14 @@ the home):
 | `root.raw` | Writable VM disk (`/dev/vda`) |
 | `config.raw` | Sealed config (`/dev/vdb`): session id + model alias. **No secrets** |
 | `guest-config.json` | Host-side copy of that config, also secretless |
-| `session.json` | Host metadata (id, repo root, HEAD, created) |
+| `session.json` | Host metadata (id, source directory, created) |
 | `transcript.json` | CLI TUI log (SDK does not write this) |
 | `console.log` | Guest serial |
 | `rpc.sock` | Host vsock proxy |
 
-`Open` creates a new id. `Resume(id)` or `Resume("")` (latest for repo) boots
-that `root.raw` again. The host git tree is not copied on resume.
+`Open` creates a new id. `Resume(id)` boots that `root.raw` again. An id is
+required; resume does not infer session identity from a directory or Git state.
+The host source directory is not copied on resume.
 
 On every start, ABox scrubs leftover plaintext secrets out of `config.raw`
 and `guest-config.json` (including leftover sessions under the old
@@ -34,7 +35,7 @@ and `guest-config.json` (including leftover sessions under the old
 ## Lifetime
 
 ```text
-Open  → clone golden → write secretless config → boot → tar HEAD into /work/repo
+Open  → snapshot source directory → clone golden → boot → transfer into /work/repo
 Turn  → user_turn / agent_event (repeat); host brokers HTTPS
 Close → shutdown RPC, SIGINT abox-vmm
 ```
@@ -51,7 +52,7 @@ Guest conversation state lives on the session disk at
 | --- | --- | --- |
 | Disk | New clone of golden | Existing `root.raw` |
 | Guest binary | Whatever was in golden **at clone time** | Same as when that session was created |
-| Repo | Fresh tar of current HEAD | Guest files already on disk |
+| Source files | Fresh snapshot of exact configured directory | Guest files already on disk |
 | Config disk | Secretless, current model | Rewritten secretless; old keys stripped |
 
 To pick up a new `abox-guest` (protocol 4), `make image-update` then **Open**,

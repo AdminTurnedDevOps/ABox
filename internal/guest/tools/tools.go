@@ -265,9 +265,11 @@ func (r Repo) InitBaseline() error {
 	cfg = exec.Command("git", "config", "user.name", "abox-guest")
 	cfg.Dir = r.Root
 	_ = cfg.Run()
-	add := exec.Command("git", "add", "-A")
+	add := exec.Command("git", "add", "-f", "-A")
 	add.Dir = r.Root
-	_ = add.Run()
+	if out, err := add.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add baseline: %w: %s", err, out)
+	}
 	commit := exec.Command("git", "commit", "--allow-empty", "-m", "abox baseline")
 	commit.Dir = r.Root
 	commit.Env = []string{

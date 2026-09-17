@@ -43,9 +43,13 @@ brew install libkrun libkrunfw
 
 ## Quickstart
 
-From this repo (or any directory). If Git is missing, dirty, or has no
-commits, ABox copies the files into a private snapshot and leaves your
-host Git alone.
+From this directory or any other directory. ABox snapshots that exact directory
+without inspecting host Git state. `.git` metadata is excluded; the guest
+creates its own private baseline for change tracking.
+
+Git ignore rules are not consulted. Every regular file beneath the selected
+directory is copied, including dotfiles, except `.git` metadata. Start ABox
+from a directory containing only files the guest is allowed to read.
 
 ![](img/abox-quickstart.gif)
 
@@ -77,7 +81,7 @@ abox
 - `/mcp` lists configured Streamable HTTP MCP servers and accepts a Bearer token (`abox mcp login` for OAuth)
 - `/help` lists slash commands
 - Model-authored `run_command` opens an approval prompt (deny is the default)
-- `abox --resume` reopens the latest session for this repo (same `root.raw`, LLM conversation, and TUI transcript). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
+- `abox --resume <id>` reopens that session's `root.raw`, LLM conversation, and TUI transcript. Plain `abox` starts a new session and prints its id.
 - `ctrl+c` quits
 - The agent runs only inside the guest (MicroVM)
 
@@ -147,7 +151,11 @@ The VM boots **only** the session clone, not the golden file. Destroy a session 
 
 ### Resume Command
 
-`abox --resume` does **not** clone the golden image again. It boots the existing `root.raw` for that session and the guest reloads conversation state from `/var/lib/abox/context.json` on that disk. The TUI reloads the same transcript (host `transcript.json`, or the guest context if that file is missing). The host git tree is not re-copied (that would overwrite guest work).
+`abox --resume <id>` does **not** clone the golden image again. It boots that
+session's existing `root.raw`, and the guest reloads conversation state from
+`/var/lib/abox/context.json` on that disk. The TUI reloads the same transcript
+(host `transcript.json`, or the guest context if that file is missing). The
+host source directory is not copied again.
 
 ## Test
 
@@ -469,7 +477,7 @@ HTTPS are host-brokered. Claims stay Planned until the hardware suite in
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ Five tools       │ list_files, read_file, search, apply_patch, run_command in guest     │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ Repo snapshot    │ Copied into guest (clean tree or ephemeral)                          │
+│ Source snapshot  │ Exact host directory copied into guest; host Git is not inspected    │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ Providers        │ Grok/OpenAI (chat completions) + Anthropic Messages. /provider keys. │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤

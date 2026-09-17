@@ -193,7 +193,7 @@ func TestRenderApprovalMarksTheSelectedChoice(t *testing.T) {
 	}
 }
 
-func TestRenderApprovalDefaultsWorkdirToRepoRoot(t *testing.T) {
+func TestRenderApprovalDefaultsWorkdirToGuestSource(t *testing.T) {
 	got := renderApproval(newTheme(false), protocol.RunCommandApprovalParams{Command: "ls", TimeoutSec: 5}, false, 60)
 	if !strings.Contains(got, protocol.GuestRepoDir) {
 		t.Errorf("empty workdir should display the guest repo root %q:\n%s", protocol.GuestRepoDir, got)

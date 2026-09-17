@@ -15,14 +15,14 @@ Two `Turn`s on the same VM. Guest context persists for the process lifetime (and
 ## CLI
 
 The TUI is multi-turn on one VM. Guest context persists on `root.raw` after
-quit, for `--resume`.
+quit, for `--resume <id>`.
 
 ```bash
 abox
 # Remember the codeword: cedar. Reply ok.
 # What was the codeword?
 
-abox --resume
+abox --resume <id>
 ```
 
 `abox exec` is a single prompt. Two turns in one process is SDK (or two
