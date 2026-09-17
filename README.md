@@ -30,16 +30,19 @@ libkrun microVM on Apple Silicon; host TUI/SDK, LLM/MCP brokers, and
 
 ## Prerequisites
 
-- Apple Silicon Mac
+- Apple Silicon Mac or Linux
 - Go 1.24+
 - Docker (today: pack the guest **root filesystem** image only; not on the session path)
 - libkrun and libkrunfw (VMM + **guest Linux kernel**; the kernel is not inside the `.raw` disk)
 
+### Mac
 ```bash
 brew tap libkrun/krun
 brew trust libkrun/krun
 brew install libkrun libkrunfw
 ```
+
+### Linux
 
 ## Quickstart
 
@@ -50,8 +53,8 @@ creates its own private baseline for change tracking.
 Git ignore rules are not consulted. Every regular file beneath the selected
 directory is copied, including dotfiles, except `.git` metadata. Start ABox
 from a directory containing only files the guest is allowed to read.
-
 ![](img/abox-quickstart.gif)
+### Mac
 
 `make image`: uses Docker once (today) to pack a raw ext4 root filesystem
 (`~/.abox/images/abox-guest.raw`): Alpine userspace, git, patch, and
@@ -85,6 +88,7 @@ abox
 - `ctrl+c` quits
 - The agent runs only inside the guest (MicroVM)
 
+### Linux
 
 ## microVM > Docker
 
@@ -171,8 +175,6 @@ Example:
 
 Currently, Grok, OpenAI, and Anthropic are supported.
 
-![](img/prov1.png)
-![](img/prov2.png)
 
 ## Test MicroVM Connectivity
 
@@ -241,7 +243,6 @@ guest ready; files:
 
 If you try to use ABox without a guest/microVM, you will see the following:
 
-![](img/novm.png)
 
 Headless agent loop (needs a VM and a provider key; the prompt is sent to the guest agent):
 
