@@ -10,7 +10,19 @@ permalink: /examples/list-files/
 
 `Session.ListFiles` on the one SDK, [`pkg/abox`]({{ '/api' | relative_url }}).
 
-No model call. Same idea as `abox --probe-vm`.
+No model call. Same RPC as `abox --probe-vm` (path `.`, depth 4, limit 50).
+
+## CLI
+
+```bash
+abox --probe-vm
+abox --resume --probe-vm      # existing disk; still no model
+```
+
+No provider key. `--probe-vm` is also the only CLI path that still talks to a
+pre-protocol-4 guest (list files only).
+
+## SDK
 
 ```go
 {% include examples/sdk-list-files.go %}

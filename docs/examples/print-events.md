@@ -12,6 +12,17 @@ permalink: /examples/print-events/
 
 JSON-encodes every `Event` (same shape as `abox exec`).
 
+## CLI
+
+```bash
+abox exec --prompt "List two files in the repo."
+```
+
+One JSON object per event on stdout. Same shape as SDK `Event`.
+[Events]({{ '/events' | relative_url }}).
+
+## SDK
+
 ```go
 {% include examples/sdk-print-events.go %}
 ```
