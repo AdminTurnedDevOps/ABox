@@ -6,11 +6,15 @@ ABox is a terminal-native agent harness comparable to OpenCode, Grok Build,
 Claude Code, and Codex CLI. It is its own harness and does not wrap or launch
 another coding-agent harness.
 
-Its defining property is microVM-native execution:
+Its defining property is microVM-native agent execution:
 
-> The agent runs inside the microVM. Prompts, model calls, tools, and
-> generated code are guest work. The host is a TUI, VMM, and reviewed
-> patch import. The answer to "host or sandbox?" is always "sandbox."
+> The agent loop, prompt and context construction, built-in tools,
+> model-authored commands, generated code, and repository effects run inside
+> the microVM. Provider HTTPS and remote Streamable HTTP MCP are performed by
+> narrow host brokers using host-held configuration and credentials. The host
+> also owns the CLI/TUI/SDK, VM and session orchestration, approvals, and any
+> future reviewed patch import. Model-controlled code and repository effects
+> remain guest-only.
 
 ABox's first milestone must provide:
 
@@ -45,34 +49,38 @@ The current plan makes these decisions:
 
 | Area | Decision |
 | --- | --- |
-| Implementation language | Go |
+| Implementation language | Go 1.25 |
+| Go module | `github.com/AdminTurnedDevOps/ABox` |
+| License | Apache-2.0 |
 | Initial host | macOS on Apple Silicon |
 | Initial guest | ARM64 Linux |
 | Initial microVM backend | libkrun over Apple Hypervisor.framework |
 | Runtime integration | Dedicated `abox-vmm` Go helper with a narrow cgo boundary |
-| Guest network | No guest NIC. TSI inet for allowlisted MCP HTTPS only |
-| Model traffic | Host provider broker. TSI inet is MCP-only |
-| Providers | OpenAI, Anthropic, and Grok through xAI |
-| Repository state | Clean Git worktree only |
+| Guest network | No guest NIC and no TSI inet or Unix hijacking; RPC uses vsock only. Hardware isolation remains unverified |
+| Model traffic | Protocol-4 host LLM broker; the guest supplies a configured model alias and bounded request data |
+| Remote MCP traffic | Protocol-4 host Streamable HTTP broker; the guest supplies configured server/tool identities and arguments, never endpoints or credentials |
+| Providers | OpenAI and xAI through Chat Completions today; Anthropic through Messages. OpenAI/xAI Responses remain Planned |
+| Repository state | Git worktree required. Clean trees archive `HEAD`; dirty or unborn trees use a private ephemeral snapshot |
 | Host workspace sharing | Prohibited |
-| Repository transfer | Private copy into a writable guest disk |
-| Change return | Reviewed patch only |
+| Repository transfer | Private snapshot copied into a writable guest disk |
+| Change return | Guest patch export is implemented. Reviewed host import remains Planned |
 | TUI framework | Bubble Tea v2, Bubbles, and Lip Gloss v2 |
 | TUI style | Full-screen near-black interface with restrained status colors |
-| agentgateway | Optional adapter; never required for basic operation |
-| Connectivity broker | LLM broker is in. Package/MCP broker remains Planned |
-| Package-manager compatibility | Origin rewrite to a guest loopback adapter, not HTTP(S) proxy |
-| Instruction loading | Supervisor reads the captured host snapshot and host configuration |
+| Public SDK | `pkg/abox`, including Open, Resume, Turn, cancellation, capabilities, approvals, probe methods, and patch export |
+| Host-guest protocol | Protocol 4: protocol 3 introduced the host LLM broker; protocol 4 added the host MCP broker and `run_command` approval |
+| Approval state | Model-authored `run_command` supports deny or allow-once and defaults to deny. Broader approvals remain Planned |
+| Session resume | Existing `root.raw`, guest conversation context, and TUI transcript can be resumed. Full event persistence, memory, and checkpoints remain Planned |
+| agentgateway | Implemented as an MCP-origin policy mode; a dedicated LLM gateway adapter remains Planned |
+| Connectivity broker | Host LLM and remote Streamable HTTP MCP brokers are implemented. Package-index brokering remains Planned |
+| Package-manager compatibility | Planned origin rewrite to a guest loopback adapter, not HTTP(S) proxying |
+| Instruction loading | Planned; scoped `AGENTS.md`, global instructions, and skills are not implemented |
 | Repo instruction authority | Repo text cannot change policy, limits, connectivity, or tools |
-| libkrun isolation profile | Intended allowlist on `krun_add_vsock(ctx, 0)`; composed boot unverified until Phase 0.5 |
+| libkrun isolation profile | Product code uses no net calls, explicit vsock with flags 0, two raw disks, and no host-path virtio-fs; hardware behavior remains unverified |
 | Model-visible tools | Five built-in ABox tools plus dynamically discovered MCP tools. No `write_file` |
-| Headless operation | `abox exec` uses the same agent and approval paths without the TUI |
-| Default VM resources | 1 vCPU and 768 MiB RAM, configurable with explicit limits |
-| VM concurrency | One running VM by default; forks remain cold until selected |
-| Background services | None after ABox exits |
-
-The Go module path and open-source license remain to be selected. Apache-2.0
-is the provisional license recommendation.
+| Headless operation | `abox exec` uses the same guest agent and brokers; without an approver, model-authored `run_command` is denied |
+| Default VM resources | 1 vCPU and 768 MiB RAM; upper resource limits and acceptance measurements remain Planned |
+| VM concurrency | No global limit is enforced today; the target is one running VM by default. Checkpoint and fork orchestration are not implemented |
+| Background services | No resident ABox daemon |
 
 ## 2.1 Resource Efficiency
 
@@ -182,11 +190,11 @@ The host-side `abox` process owns:
 - Audit records
 - Patch review and confirmed import
 
-Provider credentials are entered on the host (`/provider`) and resolved
-from env, macOS keychain, Vault, Azure Key Vault, or AWS Secrets Manager.
-They are never written to session dirs or the guest disk. The host broker
-calls the provider API; the host must not run the agent loop. MCP tokens
-still enter the guest.
+Provider credentials and MCP tokens are entered or referenced on the host and
+resolved from env-backed storage, macOS keychain, Vault, Azure Key Vault, or
+AWS Secrets Manager. Resolved values are never written to session metadata,
+`guest-config.json`, `config.raw`, or the guest disk. Host brokers perform
+provider and remote MCP HTTPS; the agent loop remains in the guest.
 
 The host supervisor must remain small. It must not contain an arbitrary shell
 execution path, generated-code runner, or generic guest-to-host file service.
@@ -238,9 +246,10 @@ The guest owns all effectful tools:
 - Generated code execution
 - Applications started by the agent
 
-The guest receives no model-provider credentials, host home-directory access,
-cloud credentials, SSH keys, Docker socket, or read-write host mount. MCP
-tokens still enter the guest.
+The guest receives no provider credential values, MCP token values, host
+home-directory access, cloud credentials, SSH keys, Docker socket, or
+read-write host mount. Protocol-4 guest configuration also excludes MCP server
+endpoints.
 
 ### 4.4 External Services
 
@@ -296,16 +305,15 @@ them inside the guest.
 
 ### 5.2 Intended libkrun Isolation Profile
 
-Write the device plan against the current C API on `containers/libkrun`
-main. The `stable-1.19.x` header still documents
-`krun_disable_implicit_{init,console,vsock}`. On main,
-`krun_disable_implicit_init` is a stub that returns `-ENOTSUP`, and
-`krun_disable_implicit_console` and `krun_disable_implicit_vsock` are
-removed. Pinning 1.19.x therefore pins a transitional API that upstream has
-already deleted. That pin-versus-main choice is an ADR-0002 input, not a
-settled fact.
+The current product helper uses the stable-1.19-style libkrun API, and current
+documentation reports libkrun 1.19.4. It explicitly disables implicit vsock,
+adds one vsock with TSI flags set to zero, attaches two RAW block disks,
+remounts `/dev/vda` as the root filesystem, and launches `abox-guest` through
+`krun_set_exec`. Moving to libkrun main after removal of transitional APIs
+requires a compatibility update. Artifact pinning and reproducible
+distribution remain open work.
 
-The isolation intent, expressed with the current API, is:
+The current device-plan calls and remaining profile requirements are:
 
 - Call `krun_add_vsock(ctx, 0)` once. Zero TSI flags means no
   `KRUN_TSI_HIJACK_INET` and no `KRUN_TSI_HIJACK_UNIX`. Only one vsock
@@ -316,9 +324,10 @@ The isolation intent, expressed with the current API, is:
   net device is added, libkrun automatically enables the TSI backend.
   `krun_add_vsock(..., 0)` is what keeps vsock without TSI. Omitting net
   devices is not isolation.
-- Add no console in the production profile. A debug profile may call
-  `krun_add_virtio_console_default` or `krun_add_serial_console_default`
-  for output only.
+- Current product code directs guest console output to the session's
+  `console.log`. Removing that console or proving its acceptable device
+  exposure remains hardening work; the plan must not claim that no console is
+  present today.
 - Do not call `krun_set_root`.
 - Do not call `krun_add_virtiofs*` with a host path. That rule is
   inspectable in code review. An in-memory overlay created by
@@ -341,26 +350,18 @@ The isolation intent, expressed with the current API, is:
   remaining path.
 - Reject unknown runtime options and arbitrary extra device arguments.
 - Bind the RPC Unix socket inside a mode `0700` session directory.
-- Set bounded CPU, memory, disk, output, and wall-clock limits.
+- Current code configures vCPU/RAM and bounds command duration/output;
+  explicit upper resource limits, disk quotas, and acceptance measurements
+  remain Planned.
 
-Guest process configuration is the Phase 0.5 decision. On main,
-`krun_set_exec`, `krun_set_env`, `krun_set_workdir`,
-`krun_set_console_output`, and `krun_set_rlimits` return `-ENOTSUP` on
-non-nitro builds and direct callers to libkrun_init `Config::apply()` with
-`.krun_config.json`. The spike must choose one:
-
-1. ABox owns init: ship init on the raw root disk and set the kernel
-   cmdline with `krun_append_kernel_cmdline`.
-2. Adopt libkrun_init plus an in-guest `.krun_config.json`.
-
-Do not assume `krun_set_exec` works on the macOS Hypervisor.framework
-build. Do not adopt libkrun-efi or another flavor in this plan unless
-Phase 0.5 records that the intended sequence failed and ADR-0002 is
-updated.
-
-The composed boot remains unverified until Phase 0.5. Documentation must
-label this profile Planned until that spike passes. The effective device
-configuration is an allowlist.
+Guest process configuration is no longer undecided in the product code:
+`abox-vmm` calls `krun_set_exec` with `/usr/local/bin/abox-guest` and a fixed
+environment on the documented libkrun 1.19.4 path. The composed product boot
+path is implemented and runnable. Its no-NIC, no-TSI, and no-host-path-
+filesystem isolation properties remain implemented but unverified until the
+named Apple Silicon hardware suite passes. Documentation must distinguish
+"boots successfully" from "hardware isolation verified." The effective
+device configuration is an allowlist.
 
 ### 5.3 Initial Backend Limitations
 
@@ -470,68 +471,49 @@ an ABox-enforced immutable bundle. Rollback and fork always clone the
 checkpoint disk and restore the matching host cursor rather than mutating
 the parent files.
 
-## 7. Proposed Repository Layout
+## 7. Repository Layout
 
-Use one Go module with three binaries and strongly separated packages:
+ABox uses one Go module with three binaries and a public SDK:
 
-```text
-.
-├── cmd/
-│   ├── abox/                  # Trusted host supervisor and TUI
-│   ├── abox-guest/            # Linux guest worker
-│   └── abox-vmm/              # Narrow libkrun/cgo helper
-├── protocol/                  # Versioned host/guest RPC types
-├── internal/
-│   ├── agent/                 # Model and tool-call loop
-│   ├── audit/                 # Session and control records
-│   ├── config/                # Validated configuration
-│   ├── connectivity/          # Host-owned endpoint-bound broker and routing
-│   ├── guest/
-│   │   └── tools/             # Effectful tool implementations
-│   ├── patch/                 # Review, validation, and host import
-│   ├── provider/
-│   │   ├── anthropic/
-│   │   ├── openai/
-│   │   └── xai/
-│   ├── repository/            # Clean-tree validation and transfer
-│   ├── runtime/
-│   │   └── libkrun/           # SandboxRuntime implementation
-│   ├── session/
-│   └── tui/
-├── images/                    # Reproducible ARM64 guest image definition
-├── test/
-│   ├── integration/
-│   └── security/
-├── docs/
-│   ├── adr/
-│   ├── architecture.md
-│   ├── roadmap.md
-│   └── threat-model.md
-├── AGENTS.md
-├── README.md
-├── PLAN.md
-├── go.mod
-└── go.sum
-```
+- `cmd/abox`: trusted CLI/TUI supervisor
+- `cmd/abox-guest`: Linux guest worker and agent loop
+- `cmd/abox-vmm`: narrow libkrun/cgo helper
+- `pkg/abox`: public Go SDK
+- `protocol`: versioned protocol-4 host/guest RPC
+- `internal/agent` and `internal/agentapi`: guest agent loop and normalized types
+- `internal/guest/tools`: five built-in guest tools
+- `internal/guest/brokerclient`: guest proxy for the host LLM broker
+- `internal/guest/mcpclient`: guest proxy for semantic MCP operations
+- `internal/llmbroker`, `internal/mcpbroker`, and `internal/hostbroker`:
+  host-side network brokers
+- `internal/credsource` and `internal/credentials`: host credential resolution
+  and fallback storage
+- `internal/repository`, `internal/runtime`, `internal/session`,
+  `internal/config`, `internal/tui`, and `internal/vmmconfig`
+- `images`: current Docker-based guest-image builder
+- `docs` and `examples`: SDK and CLI documentation and examples
 
-The Go module path remains a bootstrap decision. A placeholder module path
-should not be committed if the intended hosting organization is known before
-implementation begins.
+Dedicated audit, patch-import, checkpoint-lineage, memory, skills,
+package-broker, and architecture/ADR packages remain Planned rather than
+current repository components. The module path is
+`github.com/AdminTurnedDevOps/ABox`.
 
 ### 7.1 Host Storage Layout
 
-On macOS, use platform-appropriate user directories:
+The current default root is `~/.abox`; `ABOX_HOME` overrides it:
 
 ```text
-~/Library/Application Support/ABox/config.yaml
-~/Library/Application Support/ABox/sessions/<session-id>/
-~/Library/Application Support/ABox/memory/
-~/Library/Caches/ABox/images/<digest>/
+~/.abox/config.yaml
+~/.abox/credentials.env
+~/.abox/sessions/<session-id>/
+~/.abox/images/abox-guest.raw
 ```
 
-The configuration file stores credential references, never credential values.
-The image cache stores the image, signed or checksummed manifest, and verified
-digest metadata. A digest is verified before every session clone.
+The former `~/Library/Application Support/ABox` and
+`~/Library/Caches/ABox/images` locations are legacy migration or fallback
+paths, not the primary layout. The configuration file stores credential
+references, never credential values. A signed or checksummed image manifest
+and digest verification remain Planned.
 
 The ABox application-support root, every session directory, and every preserved
 disk directory must be mode `0700`. Cleanup resolves and validates every target
@@ -540,18 +522,23 @@ path outside that root.
 
 ## 8. Guest Image
 
-The initial guest is a reproducibly built ARM64 Linux image containing:
+The current guest is a 768 MiB raw ext4 ARM64 Linux root filesystem packed
+with Docker. Docker is used only to build or update the golden filesystem and
+is not on the session execution path. The image contains:
 
 - The statically compiled `abox-guest` worker
 - A POSIX-compatible shell
 - Git
 - Patch tooling
 - Standard file utilities
-- A minimal set of build tools needed by the demonstration repository
+- Alpine userspace and basic file utilities
 - No systemd, SSH server, Docker engine, graphical stack, or idle package
   daemon
 
-The image pipeline must:
+A reproducible controlled build, signed or checksummed manifest, image
+identity, digest verification, vulnerability-update policy, and measured
+compressed-image budget remain first-milestone requirements. The future image
+pipeline must:
 
 - Run in a controlled CI or Linux build environment.
 - Produce a raw disk image or a trusted kernel plus raw root disk supported by
@@ -571,11 +558,11 @@ execution. Phase 0 names the demonstration repository and the exact guest
 toolchain set. If that set does not fit the compressed-image budget, raise
 the budget with an ADR after measurement.
 
-Package installation is unavailable in offline mode. In direct mode, package
-acquisition must use the configured, policy-bound connectivity broker defined
-in section 14.4 rather than an unrestricted guest NIC. Required agentgateway
-mode refuses package acquisition in the first milestone because only LLM and
-MCP gateway routes are implemented.
+Package installation is unavailable through ABox today because the package
+broker is not implemented. The target direct mode must use the configured,
+policy-bound connectivity broker in section 14.4 rather than an unrestricted
+guest NIC. Required agentgateway mode will continue to refuse package
+acquisition until a first-class gateway package route exists.
 
 Guest package tools must use origin rewrite to a loopback adapter inside
 `abox-guest`, not `http_proxy`/`https_proxy`. The host broker terminates
@@ -584,27 +571,30 @@ brokered fetches.
 
 ## 9. Repository Provisioning
 
-Milestone one supports clean Git repositories only.
+The current implementation requires the starting directory to be inside a Git
+worktree and rejects submodules. It supports both clean and dirty worktrees.
 
 ### 9.1 Preconditions
 
-Before booting a guest, the host must:
+For a clean worktree with an existing commit, ABox records the repository root
+and `HEAD` and archives `HEAD`.
 
-- Confirm the current directory is inside a Git worktree.
-- Capture the repository root and current `HEAD` object ID.
-- Confirm there are no tracked modifications.
-- Confirm there are no non-ignored untracked files.
-- Reject unsupported submodules for the first milestone.
-- Record the baseline in session metadata.
+If the worktree is dirty or has no commit, ABox creates a private ephemeral
+snapshot under the mode-`0700` session directory. It copies tracked files and
+non-ignored untracked regular files, preserves executable bits, reflects
+tracked modifications and deletions, initializes a private Git repository,
+and creates a private baseline commit. It does not modify the host Git
+repository.
 
-Ignored files are not copied. This reduces the risk of copying `.env` files,
-local credentials, caches, and build artifacts into the guest.
+Untracked ignored files are excluded. Tracked files remain part of the
+snapshot even when an ignore rule matches them. The dirty-tree copy path
+rejects symlinks, symlinked directories, and unsupported special files. A
+directory that is not inside a Git worktree is not currently supported.
 
 ### 9.2 Transfer
 
-The host creates a deterministic archive of the captured Git tree using Go
-code or a narrowly constrained Git operation. It then streams bounded chunks
-over the authenticated RPC connection.
+The host archives the selected clean or ephemeral baseline with a narrowly
+constrained Git operation and streams bounded chunks over authenticated RPC.
 
 The guest extraction code must reject:
 
@@ -629,29 +619,34 @@ and later guest commits do not require host Git config. All subsequent Git
 operations happen inside the guest. The host `.git` directory is never
 mounted or copied as a live writable repository.
 
-### 9.4 Concurrent Host Changes
+### 9.4 Resume and Future Import
 
-Before patch import, ABox must recheck:
+Resume boots the existing session `root.raw` and does not recopy the host
+worktree.
 
-- The host repository is still at the captured `HEAD`.
-- The host worktree remains clean.
-- The patch applies cleanly to that baseline.
+Guest patch export is implemented, but host patch review and import are not.
+Before import is added, clean snapshots may use `HEAD` and worktree-cleanliness
+rechecks. Ephemeral dirty snapshots require a recorded source manifest and a
+design that distinguishes pre-existing host changes from agent changes.
+Current code must not claim safe dirty-tree import.
 
-If any check fails, import stops. ABox must not attempt an automatic merge in
-the first milestone.
-
-After a successful import the host worktree is dirty. The next session cannot
-start from that tree until the user commits, stashes, or otherwise restores a
-clean worktree. Document this in the README and in the TUI after import. It is
-the expected first-milestone workflow, not an error.
+Starting another session from a dirty worktree is supported; the former rule
+that the user must commit or stash before the next session is obsolete.
 
 ## 10. Host-Guest Protocol
 
-Use a narrow, versioned, typed protocol over virtio-vsock. On macOS, libkrun
-maps the selected vsock port to a protected Unix socket.
+The current host-guest RPC protocol is version 4. Normal CLI and SDK sessions
+require protocol 4. `abox --probe-vm` may speak to an older guest only far
+enough to perform its limited probe.
 
-The initial protocol may use length-prefixed JSON-RPC messages. It must not use
-unbounded newline-delimited reads.
+The transport is bounded length-prefixed JSON over virtio-vsock. On macOS,
+libkrun maps the selected vsock port to a protected Unix socket.
+
+Protocol history:
+
+- v2: turn cancellation, options, usage, and rich events
+- v3: host provider broker
+- v4: host Streamable HTTP MCP broker and model `run_command` approval
 
 Every connection must include:
 
@@ -678,7 +673,7 @@ Host may call:
 
 - Tool requests (`list_files`, `read_file`, `search`, `apply_patch`,
   `run_command`)
-- Archive and patch streaming
+- Chunked archive upload and a single-frame, frame-limited patch export response
 - `Quiesce`
 - `SetTime`
 - Shutdown / cancel
@@ -686,16 +681,19 @@ Host may call:
 Guest may call only:
 
 - `provider_open`, `provider_send`, `provider_cancel` (host LLM broker)
-- Readiness and bounded log or status notifications
+- `mcp_list`, `mcp_call`, `mcp_cancel` (host MCP broker)
+- `request_run_command_approval`
 
-`FetchPackage` and MCP stream methods (section 14.4) remain Planned.
+`FetchPackage` remains Planned. Protocol 4 does not implement the proposed
+generic MCP stream-open/read/push contract; it uses semantic MCP list, call,
+and cancel operations through the host broker.
 
 The guest must not invoke host tool, import, shell, or arbitrary-fetch
 methods. Phase 3 tests both directions.
 
-The host sets the guest clock from the trusted host clock at ready and after
-every resume. The host requests quiesce before every first-milestone
-checkpoint.
+The guest implements `set_time` and `quiesce`, but the normal supervisor
+lifecycle does not yet invoke them on startup, resume, or checkpoint. Clock
+synchronization and checkpoint orchestration remain Planned.
 
 The transport must enforce:
 
@@ -709,13 +707,14 @@ The transport must enforce:
 - Rejection of unknown methods and fields where practical
 - Redaction-safe structured logging
 
-Guest-initiated package-fetch and MCP stream methods are defined in section
-14.4. Those methods accept configured identifiers and typed relative request
-data. They never accept a raw URL, TCP destination, CONNECT target, or
-arbitrary HTTP request from the guest.
+Guest-initiated provider and MCP methods accept configured identifiers and
+typed bounded data. They never accept a raw URL, TCP destination, CONNECT
+target, or arbitrary HTTP request from the guest. The future package-fetch
+contract in section 14.4 must preserve the same restriction.
 
-Large repository and patch payloads should be transferred through bounded
-chunks rather than one unbounded base64 value.
+Repository archives are chunked today. Patch export remains a single
+frame-limited response; chunked patch transfer remains Planned if the patch
+budget grows beyond the frame limit.
 
 The guest must never be able to request:
 
@@ -733,7 +732,8 @@ The first built-in ABox tool set is exactly five tools: `list_files`,
 `read_file`, `search`, `apply_patch`, and `run_command`. Dynamically
 discovered MCP tools are additional model-visible tools. They are not a
 sixth built-in ABox tool and they are not a single MCP meta-tool. The
-provider tool set is therefore "five ABox tools plus approved MCP tools."
+provider tool set is therefore "five ABox tools plus configured and allowlisted
+discovered MCP tools."
 
 This is a product decision, not an omission. Milestone one does not add
 `write_file`; file creation and edits go through `apply_patch`. Read-only
@@ -885,7 +885,7 @@ The first milestone must load and apply:
   rules.
 
 Instructions and skill metadata are read by the trusted supervisor from the
-host-captured clean repository snapshot and trusted host configuration. This
+host-captured repository snapshot and trusted host configuration. This
 is a provisioning read, not a model-directed host file tool. The path is
 trusted. The file contents are not. Repository `AGENTS.md`, repo-bundled
 skills, and other repo-sourced instruction text are untrusted model input.
@@ -906,6 +906,16 @@ The TUI must show which instruction files and skills are active for the current
 turn.
 
 ## 12.3 Sessions and Memory
+
+**Current status:** Basic same-disk session resume is implemented. The guest
+persists conversation messages in `/var/lib/abox/context.json`; the host stores
+`session.json` and, for the TUI, `transcript.json`. CLI `--resume` and SDK
+`Resume` boot the existing `root.raw` without recopying the repository. This
+is not yet the append-only normalized event store, inspectable memory system,
+checkpoint bundle, approval restoration, retention policy, or corruption
+recovery specified below. Explicit-ID resume works for ephemeral dirty
+snapshots, but automatic latest-for-repository matching needs correction
+because current session metadata records the private snapshot root.
 
 The first milestone must persist sessions and useful memory without a resident
 daemon or heavyweight database service.
@@ -942,37 +952,36 @@ all sessions. Load indexes and event ranges on demand.
 
 ## 12.4 MCP Client
 
-MCP client functionality is required in the first milestone. The guest owns
-MCP server discovery, tool invocation, and any stdio server process.
+Protocol 4 implements remote Streamable HTTP MCP through a host broker. The
+host owns remote initialization, capability negotiation, tool discovery,
+Streamable HTTP sessions, credential attachment, invocation, cancellation,
+origin enforcement, and bounded result conversion. The guest uses `mcp_list`,
+`mcp_call`, and `mcp_cancel`, caches validated tool schemas, adds configured
+tools to the model-visible set, and returns results to the guest agent loop.
 
-Required transports:
+The guest supplies only a configured server name, discovered tool name, call
+identifier, and bounded JSON arguments. It cannot supply an endpoint, HTTP
+header, authorization value, or redirect destination. MCP tokens remain on
+the host.
 
-- Stdio MCP servers launched inside the guest
-- Streamable HTTP MCP servers through the policy-bound connectivity broker
-- SSE compatibility where required by configured servers
+Implemented:
 
-Remote transports use only the connectivity broker contract in section 14.4.
+- Remote Streamable HTTP MCP
+- Host-side discovery and invocation
+- Per-server configured tool allowlists
+- Same-origin redirect enforcement
+- Schema, argument, result, timeout, concurrency, and cancellation bounds
+- Direct, agentgateway-origin, and offline policy modes
 
-The host exposes no generic TCP proxy. For remote MCP, the guest sends a typed
-transport request over vsock and the trusted connectivity broker can contact
-only an exact configured endpoint. In agentgateway mode, required MCP traffic
-is sent only to the configured agentgateway endpoint. In offline mode, only
-guest-local stdio MCP servers are available.
+Still Planned:
 
-The MCP implementation must support:
+- Guest-local stdio MCP servers
+- MCP tool approval prompts
+- MCP resources and prompts
+- Richer provenance and audit UI
 
-- Initialization and capability negotiation
-- Tool discovery and schema translation
-- Tool invocation and structured errors
-- Cancellation and timeouts
-- Session lifecycle
-- User approval rules per server or tool
-- Output and schema size limits
-- Clear provenance in the TUI
-
-MCP resources and prompts may be added after the core tool path works, but they
-are still required before the first milestone is complete. MCP server-provided
-instructions and tool descriptions are untrusted model input.
+MCP server-provided instructions, schemas, and tool descriptions are untrusted
+model input.
 
 ## 13. Model Providers
 
@@ -980,9 +989,9 @@ Milestone one supports OpenAI, Anthropic, and Grok through xAI.
 
 | Provider | Initial API | Default credential environment variable |
 | --- | --- | --- |
-| OpenAI | Responses API | `OPENAI_API_KEY` |
+| OpenAI | Chat Completions today; Responses Planned | `OPENAI_API_KEY` |
 | Anthropic | Messages API | `ANTHROPIC_API_KEY` |
-| Grok/xAI | xAI Responses API | `XAI_API_KEY` |
+| Grok/xAI | Chat Completions today; Responses Planned | `XAI_API_KEY` |
 
 ### 13.1 Provider Interface
 
@@ -1002,10 +1011,10 @@ reasoning or tool-use turn correctly.
 
 ### 13.2 OpenAI and xAI
 
-xAI supports an OpenAI-compatible Responses flow. OpenAI and xAI can share a
-carefully tested wire implementation while remaining separate provider types
-with different default base URLs, authentication settings, model names, and
-compatibility tests.
+OpenAI and xAI currently share an OpenAI-compatible Chat Completions streaming
+implementation while remaining separate provider types with different default
+base URLs and compatibility behavior. Migration to Responses remains a
+first-milestone requirement.
 
 ### 13.3 Anthropic
 
@@ -1015,15 +1024,23 @@ blocks while preserving the assistant content needed for subsequent turns.
 
 ### 13.4 Credentials
 
-- LLM credentials remain only in host memory.
-- Sources: env, macOS keychain, Vault KV v2, Azure Key Vault, AWS Secrets Manager.
-- Credentials are never written to session logs or `config.raw`.
-- LLM credentials are never copied into the guest.
-- MCP tokens still enter the guest until section 14.4.
-- Configuration stores credential references, not secret values.
+- LLM credentials and MCP tokens remain host-side.
+- Approved host sources are env-backed storage, macOS keychain, Vault KV v2,
+  Azure Key Vault, and AWS Secrets Manager.
+- Credential references may be stored in `config.yaml`; resolved values are
+  not.
+- Resolved values are never written to session logs, `guest-config.json`,
+  `config.raw`, or the guest disk.
+- Protocol 4 resolves provider credentials in `internal/llmbroker` and MCP
+  credentials in `internal/mcpbroker`.
+- `Session.SetMCPTokens` changes host-memory MCP overrides and never injects
+  guest environment variables.
+- Deprecated secret-bearing protocol fields remain only for compatibility; a
+  protocol-4 guest rejects secret-bearing boot configuration.
 
-The credential source is distinct from the connectivity broker. It resolves
-and injects host-held credentials but does not choose or open network routes.
+The credential source is distinct from connectivity policy: it resolves a
+host-held value, while the selected host broker determines the permitted
+network destination.
 
 ### 13.5 Configured Models
 
@@ -1064,74 +1081,59 @@ Connectivity is independent from the guest runtime isolation profile.
 
 ### 14.2 `direct`
 
-- The trusted host supervisor may contact explicitly configured model-provider
-  endpoints.
-- The guest MCP client may contact configured MCP endpoints over TSI inet.
+- The trusted host LLM broker may contact the selected configured provider
+  `base_url`.
+- The trusted host MCP broker may contact configured Streamable HTTP MCP URLs.
 - Package-index fetch remains Planned (section 14.4).
-- The guest remains without a NIC.
-- Direct mode does not imply unrestricted guest egress.
+- The guest has no NIC and no TSI inet or Unix hijacking.
+- Direct mode does not imply unrestricted guest or host egress.
 
 ### 14.3 `agentgateway`
 
-The LLM gateway adapter is Planned. Today `agentgateway` mode applies to MCP
-endpoints; the host broker dials each model's `base_url`.
+Today `agentgateway` is an MCP-origin policy mode. Configured `mcp_servers`
+URLs are treated as gateway origins; with `enforcement: required`, exactly one
+server is allowed and configuration fails closed otherwise. ABox is a client
+of a pre-existing gateway and does not install a local gateway, Kubernetes
+CRDs, Helm charts, or a gateway control plane. The guest device plan remains
+identical.
 
-- ABox is a standalone client of a pre-existing agentgateway endpoint.
-- ABox does not install a local gateway, Kubernetes CRDs, Helm charts, or an
-  agentgateway control plane.
-- Selected host-side traffic routes through a configured agentgateway
-  endpoint.
-- LLM traffic uses a dedicated gateway provider adapter, not the direct
-  OpenAI, xAI, or Anthropic clients. agentgateway's documented frontend is
-  OpenAI-compatible. The gateway adapter speaks that frontend, maps ABox
-  model profile names to gateway model aliases, and authenticates with
-  gateway session credentials.
-- Direct provider credentials and direct provider base URLs are not used
-  in required-gateway mode.
-- A required route fails closed if the gateway is unavailable or
-  misconfigured.
-- Required gateway routing must not silently instantiate or fall back to a
-  direct provider client.
-- The guest runtime configuration remains identical to the offline profile.
-- Configured LLM and remote MCP traffic can be marked as required gateway
-  routes in the first milestone.
+LLM traffic still uses each selected model's `base_url`. A dedicated LLM
+gateway adapter is Planned. That adapter must speak the gateway's documented
+frontend, map ABox profile names to gateway aliases, use gateway credentials,
+fail closed when required, and never silently fall back to a direct provider.
+API, A2A, package, and other route types remain unsupported until first-class
+clients and enforcement paths exist.
 
-The first adapter targets LLM and MCP traffic. API and A2A route values must be
-rejected until corresponding first-class clients and enforcement paths exist.
-
-Example configuration:
+Current MCP configuration:
 
 ```yaml
-runtime:
-  isolation: microvm
-  backend: libkrun
-  network: deny-by-default
-
 connectivity:
   mode: agentgateway
-  endpoint: https://agentgateway.example.com
   enforcement: required
-  route:
-    - llm
-    - mcp
-```
 
-The parser may understand only implemented values initially. It must reject or
-clearly report unimplemented route types instead of pretending they are
-enforced.
+mcp_servers:
+  - name: agw
+    url: https://agentgateway.example.com/mcp
+```
 
 ### 14.4 Connectivity Broker Contract
 
-This section is Planned for MCP and package indexes. The LLM provider broker
-is already in. The first milestone includes a typed, allowlisted host broker
-for configured package indexes and remote MCP servers. The broker is implemented by
-`internal/connectivity` inside the trusted supervisor and does not run as a
-separate daemon.
+Two host brokers are implemented:
 
-The broker exposes distinct protocol methods rather than a generic proxy.
-A unary `MCPExchange` body is not enough for streamable HTTP or SSE.
+- `internal/llmbroker`: provider open/send/cancel streams
+- `internal/mcpbroker`: semantic MCP list/call/cancel operations over
+  host-owned Streamable HTTP sessions
+
+For MCP, the guest sends configured server and discovered tool identifiers.
+The host maps the server identifier to trusted configuration, resolves any
+credential, enforces the configured origin, and performs the MCP operation.
+The current protocol methods are:
 
 ```text
+mcp_list {}
+mcp_call { call_id, server, tool, arguments }
+mcp_cancel { call_id }
+
 FetchPackage {
   index_id
   method: GET | HEAD
@@ -1147,31 +1149,18 @@ FetchPackageResult {
   bounded_cache_headers
   bounded_body
 }
-
-MCPStreamOpen {
-  server_id
-  operation
-  bounded_headers
-  bounded_body
-}
-
-MCPStreamRead {
-  stream_id
-}
-
-MCPStreamCancel {
-  stream_id
-}
 ```
 
-The host may also push bounded MCP stream frames. Every stream has a
-lifetime, byte budget, and cancellation path.
+The package-index broker, `FetchPackage`, and guest loopback origin-rewrite
+adapters remain Planned. Protocol 4 does not use the earlier proposed generic
+MCP stream-open/read/push contract.
 
 The contract enforces:
 
 - The guest sends a configured server or index identifier, never a URL.
-- The host maps that identifier to exact HTTPS endpoint origins and allowed
-  path prefixes from trusted configuration.
+- For MCP, the host pins requests and redirects to the configured HTTPS
+  origin. The Planned package broker must map each `index_id` to configured
+  origins and allowed path prefixes.
 - Package fetch permits only fixed `GET` and `HEAD` methods.
 - `FetchPackageResult` carries status, content type, content length, and a
   bounded cache-header allowlist. Unknown or hop-by-hop headers are dropped.
@@ -1190,13 +1179,12 @@ The contract enforces:
 - Request and response bytes, duration, redirect count, and concurrency are
   bounded and cancellable.
 - The broker is not a TCP, CONNECT, SOCKS, DNS, or general HTTP forwarder.
-- Provider, gateway, package-index, MCP, and host credentials remain on the
-  host and are never returned to the guest. MCP tokens are the current exception.
+- Provider, gateway, package-index, MCP, and other host credential values
+  remain on the host and are never returned to the guest.
 - In offline mode, all remote broker methods are refused.
-- With required agentgateway enforcement, the broker may open only the
-  configured agentgateway endpoint and never a direct backend or package-index
-  endpoint. Package acquisition therefore fails closed in this mode in the
-  first milestone.
+- With required agentgateway enforcement, the MCP broker may open only the
+  configured gateway origin. Package acquisition fails closed; LLM traffic
+  continues to use the selected `base_url` until the dedicated adapter exists.
 - The host opens HTTPS using the operating system's default trust store. ABox
   does not manage custom CA bundles or copy CA certificates into the guest.
 
@@ -1296,8 +1284,8 @@ The patch-review screen provides:
 - Patch statistics
 - Reject and import actions
 - A final explicit import confirmation modal
-- After import, a notice that the host worktree is now dirty and the next
-  session requires a commit or another clean tree
+- After import, a notice that the host worktree is now dirty; another session
+  may use the dirty-tree ephemeral snapshot path
 
 The default action must be non-destructive. Cancellation or terminal closure
 must not import the patch.
@@ -1320,6 +1308,14 @@ The TUI must not include:
 - Automatic patch import
 
 ### 15.7 Default Approval Policy
+
+**Current status:** Protocol 4 and the TUI implement model-authored
+`run_command` approval with `deny` and `allow_once`; deny is the default. The
+SDK exposes `SetApprover`, while `abox exec` installs no approver and therefore
+denies commands. Remember-for-session, MCP, resource, checkpoint, rollback,
+fork, and patch-import approval flows remain Planned. The table below is the
+target first-milestone policy, not the current implementation. MCP tools and
+`apply_patch` do not currently prompt.
 
 | Action | Default |
 | --- | --- |
@@ -1349,6 +1345,11 @@ policy authorizes it, the action is denied. There is no implicit
 
 ## 16. Patch Export and Import
 
+**Current status:** Guest patch export exists, but it currently uses
+`git diff HEAD`; untracked names appear only in the summary and their contents
+are absent from the patch. Host validation, review, and import are not
+implemented. The requirements below describe the completed target path.
+
 ### 16.1 Export
 
 At the end of a successful session, the guest:
@@ -1367,8 +1368,9 @@ Before review, the host validates:
 - No traversal
 - No writes outside the repository
 - No unsupported file modes or special files
-- Baseline `HEAD` still matches
-- Host worktree is still clean
+- For a clean baseline, captured `HEAD` and worktree cleanliness still match
+- For an ephemeral dirty baseline, a recorded source manifest still matches
+  and pre-existing changes are distinguished from guest changes
 - Patch applies cleanly in check mode
 
 ### 16.3 Review and Confirmation
@@ -1404,7 +1406,7 @@ The first lifecycle is:
 6. Start `abox-vmm` with a fixed device plan.
 7. Wait for authenticated guest readiness and set the guest clock from the
    host clock.
-8. Transfer the clean repository snapshot.
+8. Transfer the selected clean or ephemeral repository snapshot.
 9. Run the agent and tool loop.
 10. Idle-stop and resume the same session disk when resource policy requires.
     Set the guest clock again after every resume.
@@ -1454,7 +1456,13 @@ Audit logs must not contain:
 
 ## 19. Documentation Deliverables
 
-Create these before implementing the vertical slice:
+Current documentation includes the README and dedicated SDK, API, CLI/TUI,
+protocol, session, credential, approval, MCP, event, example, quickstart, and
+troubleshooting pages. `docs/architecture.md`, `docs/threat-model.md`,
+`docs/roadmap.md`, and the planned ADR set have not been created and remain
+outstanding. The former instruction to create them before the vertical slice
+is historical; they must now document the implemented protocol-4 architecture
+and clearly distinguish implemented-but-unverified controls from future work.
 
 ### 19.1 `README.md`
 
@@ -1463,7 +1471,7 @@ Create these before implementing the vertical slice:
 - Supported platform and backend
 - Clear security disclaimer
 - Explicit statement that the project is experimental
-- Clean-worktree requirement and dirty-tree-after-import workflow
+- Clean and ephemeral dirty-tree snapshot behavior
 - Link to architecture and threat model
 
 ### 19.2 `docs/architecture.md`
@@ -1513,10 +1521,10 @@ Initial ADRs:
 - ADR-0005: Separate guest network isolation from host connectivity routing
 - ADR-0006: Use native provider adapters behind a common model interface
 - ADR-0007: Use a dedicated VMM helper process for the cgo boundary
-- ADR-0008: Require clean Git repositories for milestone one
+- ADR-0008: Use clean `HEAD` archives or private dirty/unborn snapshots
 - ADR-0009: Enforce lightweight default resource budgets
 - ADR-0010: Use cold disk checkpoints for rollback and fork
-- ADR-0011: Keep MCP execution in the guest with endpoint-bound remote transport
+- ADR-0011: Use a semantic host broker for remote MCP and keep future stdio MCP in the guest
 - ADR-0012: Use an endpoint-bound host broker while the guest has no NIC
 
 ADR-0002 must compare at least libkrun, vfkit, direct
@@ -1554,15 +1562,23 @@ first-milestone product defined in section 23. This is a 0.1/1.0 program.
 No individual phase is a separately shippable product or reduced ABox
 release.
 
+**Status note:** These phase checklists are the acceptance roadmap, not a
+claim that implementation proceeded in this order. Development advanced out
+of order: protocol 4, the public SDK, TUI, basic resume, host LLM/MCP brokers,
+host-only credentials, dirty-tree snapshots, and `run_command` approval exist,
+while several earlier documentation, image, runtime-hardening, and hardware
+gates remain incomplete. Completing an implementation task does not imply
+that its phase exit criteria or security evidence passed.
+
 ### Phase 0: Project Decisions
 
-- Select the final Go module path.
-- Select the open-source license.
+- Record the selected Go module path, `github.com/AdminTurnedDevOps/ABox`.
+- Record the selected Apache-2.0 license.
 - Confirm the minimum macOS version.
 - Pin a maintained stable libkrun release and compatible libkrunfw artifact.
 - Decide whether runtime artifacts are downloaded, bundled, or discovered from
   an installation.
-- Confirm the session and image-cache layout and name the Apple Silicon
+- Record the current `~/.abox` session/image layout and name the Apple Silicon
   resource baseline machine.
 - Name the demonstration repository and the exact guest toolchain set used to
   judge the image-size budget.
@@ -1584,24 +1600,20 @@ Exit criteria:
 
 ### Phase 0.5: libkrun Boot Spike
 
-This phase is disposable research, not product implementation. Put the
-spike in a throwaway tree or `research/` directory. Do not start
-`cmd/abox-vmm` or treat spike code as the runtime. Record the working
-call sequence, then throw the spike away or isolate it from the module
-that ships.
-
-Perform this spike on the dedicated Apple Silicon host. Isolation claims
-stay Planned until the recorded sequence is copied into documentation
-and later product code.
+The product VMM path now boots with the intended device-plan calls, but the
+disposable research record and named-hardware evidence required by this phase
+do not exist. Reproduce the product call sequence on the dedicated Apple
+Silicon host and record the evidence without treating a successful boot as
+proof of isolation. Isolation claims stay Planned until the hardware suite
+passes.
 
 - Link the pinned libkrun and libkrunfw from a narrow cgo helper.
-- Compare that pin to `containers/libkrun` main. Record whether the pin still
-  has `krun_disable_implicit_*` and whether `krun_set_exec` returns
-  `-ENOTSUP`.
+- Compare the current 1.19-style product API to `containers/libkrun` main and
+  record the migration requirements for removed transitional calls.
 - Build the intended release device plan from section 5.2:
   `krun_add_vsock(ctx, 0)`, no net, no host-path virtio-fs, two raw disks.
-- Decide guest process configuration: ABox-owned init plus
-  `krun_append_kernel_cmdline`, or libkrun_init plus `.krun_config.json`.
+- Record the current `krun_set_exec` guest process configuration and verify it
+  on the named supported runtime.
 - Boot a guest with a writable root disk, a sealed read-only config disk,
   and vsock RPC.
 - Prove guest-local loopback and guest-local Unix sockets work. They are
@@ -1622,7 +1634,7 @@ Exit criteria:
 - Guest probes cannot reach host canaries, LAN, or the external network.
   TSI is off.
 - No host filesystem is exposed.
-- Init ownership (ABox init vs libkrun_init) is written down.
+- Guest process launch and init ownership are written down.
 - Failures change ADR-0002 and section 5.2; they do not silently add
   host-path virtio-fs, TSI, or a guest NIC.
 
@@ -1630,8 +1642,8 @@ Exit criteria:
 
 - Complete README, architecture, threat model, roadmap, ADRs, and AGENTS.md
   from the Phase 0 drafts and the Phase 0.5 research record.
-- Mark all implementation and security controls as planned, not implemented,
-  unless Phase 0.5 already verified them on the named host.
+- Mark product controls as implemented where code exists, but keep isolation
+  claims Planned until the named hardware suite verifies them.
 - Document the libkrun TSI, Unix-socket hijack, and host-path virtio-fs
   hazards explicitly. Do not document `krun_disable_implicit_*` as required
   APIs unless the chosen pin still has them.
@@ -1649,8 +1661,8 @@ Exit criteria:
 
 - Initialize the Go module.
 - Add `cmd/abox`, `cmd/abox-guest`, and `cmd/abox-vmm`.
-- Create provider, runtime, protocol, agent, repository, patch, and TUI package
-  boundaries.
+- Preserve the current provider, broker, runtime, protocol, agent, repository,
+  SDK, and TUI package boundaries; add patch/import boundaries when built.
 - Scaffold `abox exec` as a second driver over the same application services.
 - Define and test the macOS session, configuration, memory, and image-cache
   paths.
@@ -1668,8 +1680,9 @@ Exit criteria:
 
 - Implement framed messages and version negotiation.
 - Add session capabilities and typed methods.
-- Add typed package-fetch and MCP stream methods with no raw URL or
-  destination fields.
+- Preserve protocol-4 semantic MCP methods (`mcp_list`, `mcp_call`, and
+  `mcp_cancel`) and add typed package-fetch methods separately, with no raw
+  URL or destination fields.
 - Split host-initiated and guest-initiated allowlists.
 - Add `Quiesce` and `SetTime` methods.
 - Add deadlines, cancellation, and size limits.
@@ -1740,16 +1753,21 @@ Exit criteria:
 
 ### Phase 7: Repository Transfer
 
-- Validate a clean Git repository.
-- Create the deterministic snapshot.
-- Stream and safely extract it in the guest.
+- Support clean committed snapshots through `git archive HEAD`.
+- Support dirty and unborn Git worktrees through a private ephemeral baseline.
+- Include tracked and non-ignored untracked regular files; preserve tracked
+  modifications, deletions, and executable bits.
+- Reject submodules and unsafe or unsupported file types.
+- Stream and safely extract the selected snapshot in the guest.
 - Initialize the private guest baseline.
 - Verify guest changes do not change host files.
 
 Exit criteria:
 
-- Clean repositories transfer correctly.
-- Dirty repositories and submodules fail clearly.
+- Clean, dirty, and unborn Git worktrees transfer correctly.
+- Non-Git directories, submodules, unsafe symlinks, and malicious archive
+  paths fail clearly.
+- Ignored untracked files do not enter the snapshot.
 - Malicious archive-path tests are rejected.
 
 ### Phase 8: Providers
@@ -1816,19 +1834,20 @@ Exit criteria:
 
 ### Phase 12: Connectivity Broker and MCP Client
 
-Implement the broker before any remote MCP client code.
+Remote Streamable HTTP MCP is implemented through the protocol-4 semantic host
+broker. Remaining work is MCP approval, guest-local stdio MCP, richer
+provenance, and the separate package-index broker and origin-rewrite path. Do
+not replace the semantic MCP contract with a generic HTTP or TCP proxy.
 
-- Implement offline and direct host routing for the broker.
-- Implement `FetchPackage` and MCP stream-open, stream-read, cancel, and
-  host-push frames.
+- Preserve and extend the implemented offline and direct host routing.
+- Preserve host MCP list/call/cancel and implement `FetchPackage` separately.
 - Implement guest origin rewrite, including response-body rewrite and
   secondary `index_id` entries.
 - Reject raw URLs, CONNECT, proxy-variable, and unconfigured origins.
-- Then implement guest-side MCP initialization, discovery, and tool
-  invocation on top of that broker.
 - Launch stdio MCP servers only inside the guest.
 - Add per-server and per-tool approvals.
-- Translate discovered MCP tools into the provider tool set with provenance.
+- Preserve discovered MCP translation into the provider tool set and add
+  richer provenance.
 - Add malicious schema, oversized output, cancellation, timeout, and server
   crash tests.
 - Add SSRF, raw-URL, redirect, header-injection, and offline-refusal tests.
@@ -1837,7 +1856,7 @@ Exit criteria:
 
 - A local stdio MCP tool runs entirely in the guest.
 - A remote MCP tool in direct mode reaches only its configured endpoint
-  through stream methods.
+  through the semantic host broker.
 - Offline mode cannot reach a remote MCP server or package index.
 - Package follow-up URLs in pip, npm, and cargo responses stay on configured
   `index_id` origins.
@@ -1980,7 +1999,7 @@ Exit criteria:
 - Checkpoint lineage, host-cursor restore, and append-only audit
 - Resource accounting
 - Connectivity broker identifier mapping, limits, and offline refusal
-- Bidirectional RPC allowlists and MCP stream framing
+- Bidirectional RPC allowlists and semantic MCP method framing
 - Origin rewrite versus proxy-variable rejection
 - Repo instruction isolation from policy and limits
 - Checkpoint quiesce and handle invalidation
@@ -2076,7 +2095,8 @@ as verified.
 
 The milestone is complete when a user can:
 
-1. Start `abox` in a clean Git repository on Apple Silicon.
+1. Start `abox` in a Git repository on Apple Silicon, using either a clean
+   `HEAD` archive or a private ephemeral snapshot of a dirty or unborn tree.
 2. Select a configured OpenAI, Anthropic, or Grok model.
 3. Start a real libkrun hardware-isolated ARM64 Linux microVM.
 4. Transfer the captured repository privately into the guest.
@@ -2087,8 +2107,9 @@ The milestone is complete when a user can:
 9. Receive a final patch generated from the guest baseline.
 10. Review files and hunks in the TUI.
 11. Reject the patch with no host change, or approve and separately confirm
-    import. After import the host worktree is dirty; the next session requires
-    a commit or another clean tree.
+    import. For an initially dirty snapshot, prove that pre-existing host
+    changes are distinguished from agent changes and concurrent changes fail
+    closed.
 12. Load repository instructions and activate configured skills.
 13. Compact an intentionally long context and continue the same task.
 14. Discover and invoke a guest-local MCP tool.
@@ -2130,7 +2151,6 @@ Do not implement yet:
 - Guest direct network access
 - Live memory snapshots and live migration
 - Automatic patch merge or conflict resolution
-- Dirty-worktree transfer
 - Submodule support
 - Git-based package dependencies
 - `write_file` or an auto-approved read-only command allowlist
@@ -2183,17 +2203,20 @@ These phases require separate ADRs and threat-model updates.
 - The first host is Apple Silicon running a supported modern macOS release.
 - The host supports Hypervisor.framework and permits hardware virtualization.
 - The first guest can be ARM64 Linux.
-- Repositories use Git and can begin from a clean worktree.
-- Model calls originate from the trusted host supervisor.
+- Repositories use Git and may begin clean, dirty, or without a commit;
+  non-Git directories are not currently supported.
+- Provider HTTPS originates from the trusted host broker; the model loop and
+  request construction remain in the guest.
 - The guest has no NIC in every first-milestone connectivity mode.
-- Offline is a broker and provider-routing mode. Direct mode can acquire
-  configured packages and reach configured remote MCP servers. Required
-  agentgateway mode can reach configured remote MCP servers only through the
-  gateway and refuses package acquisition in the first milestone. None of
+- Offline is a broker and provider-routing mode. Today direct mode allows the
+  host provider and configured remote MCP brokers; agentgateway mode restricts
+  remote MCP to configured gateway origins while model providers still use
+  their selected `base_url`. Package acquisition remains Planned. None of
   these modes changes the guest device plan.
-- Package tools in the guest use origin rewrite. They do not use HTTP(S)
-  proxy variables to reach HTTPS indexes.
-- Users accept that ignored local files are not present in the guest.
+- Planned package adapters will use origin rewrite rather than HTTP(S) proxy
+  variables; no package adapter exists today.
+- Users accept that untracked ignored local files are not present in an
+  ephemeral snapshot. Tracked files remain included.
 - Users accept that the initial image has a limited toolchain set.
 - Users accept that a successful patch import leaves a dirty host worktree.
 - The host and local administrator are trusted.
@@ -2204,28 +2227,47 @@ These phases require separate ADRs and threat-model updates.
   that can use Hypervisor.framework. Nested cloud macOS runners are not that
   host.
 
-## 27. Blockers and Open Questions
+## 27. Resolved Decisions and Open Work
 
-The following must be resolved during Phase 0 or early implementation:
+Resolved decisions:
 
-- Final Go module path
-- Open-source license
+- Go module: `github.com/AdminTurnedDevOps/ABox`
+- License: Apache-2.0
+- Go language version: 1.25
+- Primary storage root: `~/.abox`, overridable with `ABOX_HOME`
+- Current host-guest protocol: 4
+- Current documented runtime: libkrun 1.19.4-style API
+- Current guest launch: `krun_set_exec`
+- Current remote MCP path: host Streamable HTTP broker
+- Current repository path: clean `HEAD` archive or dirty/unborn ephemeral Git
+  snapshot
+
+Still open or incomplete:
+
 - Minimum supported macOS version
 - Exact pinned libkrun and libkrunfw versions, including whether the pin is
   `stable-1.19.x` or a main-line commit after the implicit-API removal
-- Phase 0.5 result: `krun_add_vsock(ctx, 0)` boot, two-disk config, vsock
-  listen direction, and ABox-init versus libkrun_init
+- Recorded Phase 0.5 evidence for the current `krun_set_exec`,
+  `krun_add_vsock(ctx, 0)`, two-disk boot and vsock direction
 - Guest-side rewrite rules for pip, npm, and cargo absolute follow-up URLs
 - Runtime artifact distribution and code-signing approach
 - Reproducible guest image build environment
 - Image update and vulnerability-response policy
-- Final macOS session and image-cache layout
 - Named demonstration repository and toolchain set for the image budget
 - Named Apple Silicon baseline machine for resource budgets
 - Dedicated non-nested Apple Silicon hardware runner, decided in Phase 0
 - Validation or evidence-based adjustment of the initial resource budgets
 - Exact explicit-confirmation interaction for patch import
 - Go sum-database policy for origin-rewritten `GOPROXY`
+- Context accounting and compaction
+- Scoped `AGENTS.md`, global instructions, and skills
+- Full append-only session events and inspectable memory
+- Correct latest-for-repository resume association for ephemeral snapshots
+- MCP approval and guest-local stdio MCP
+- Patch review and host import, including safe dirty-baseline handling
+- Cold checkpoint, rollback, fork, lineage, and lifecycle UI
+- OpenAI/xAI Responses adapters and broader provider fixtures
+- Dedicated LLM agentgateway adapter
 
 None of these blockers justifies falling back to host command execution,
 container-only isolation, a read-write workspace mount, or unenforced guest
