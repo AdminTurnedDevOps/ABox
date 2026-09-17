@@ -12,11 +12,11 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	id := ""
-	if len(os.Args) > 1 {
-		id = os.Args[1]
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: sdk-resume <session-id>")
+		os.Exit(2)
 	}
-	sess, err := abox.Resume(ctx, id, abox.Options{})
+	sess, err := abox.Resume(ctx, os.Args[1], abox.Options{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

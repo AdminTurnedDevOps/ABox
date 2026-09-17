@@ -30,7 +30,7 @@ func TestCloneFileCopiesContents(t *testing.T) {
 
 func TestPrepareResumeDoesNotClobberRoot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	s, err := session.Create("/repo", "head")
+	s, err := session.Create("/source")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestPrepareResumeDoesNotClobberRoot(t *testing.T) {
 
 func TestPrepareResumeRewritesReadOnlyConfig(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	s, err := session.Create("/repo", "head")
+	s, err := session.Create("/source")
 	if err != nil {
 		t.Fatal(err)
 	}

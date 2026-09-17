@@ -20,7 +20,7 @@ There is no `abox export` (or similar). Guest edits stay on that session's
 ```bash
 abox
 # ask the agent to add a file
-abox --resume                 # later; same disk
+abox --resume <id>            # later; same disk
 ```
 
 Dumping `git diff` vs the imported baseline is SDK `ExportPatch`.

@@ -60,7 +60,7 @@ The current plan makes these decisions:
 | Model traffic | Protocol-4 host LLM broker; the guest supplies a configured model alias and bounded request data |
 | Remote MCP traffic | Protocol-4 host Streamable HTTP broker; the guest supplies configured server/tool identities and arguments, never endpoints or credentials |
 | Providers | OpenAI and xAI through Chat Completions today; Anthropic through Messages. OpenAI/xAI Responses remain Planned |
-| Repository state | Git worktree required. Clean trees archive `HEAD`; dirty or unborn trees use a private ephemeral snapshot |
+| Source state | Any host directory is snapshotted exactly; host Git state is not inspected and `.git` metadata is excluded |
 | Host workspace sharing | Prohibited |
 | Repository transfer | Private snapshot copied into a writable guest disk |
 | Change return | Guest patch export is implemented. Reviewed host import remains Planned |
@@ -569,32 +569,24 @@ Guest package tools must use origin rewrite to a loopback adapter inside
 HTTPS. The guest never issues CONNECT and never needs a CA bundle for
 brokered fetches.
 
-## 9. Repository Provisioning
+## 9. Source Provisioning
 
-The current implementation requires the starting directory to be inside a Git
-worktree and rejects submodules. It supports both clean and dirty worktrees.
+The current implementation accepts any host directory. It snapshots exactly
+the requested directory and does not discover a Git root or inspect host
+branches, commits, ignore rules, or working state.
 
 ### 9.1 Preconditions
 
-For a clean worktree with an existing commit, ABox records the repository root
-and `HEAD` and archives `HEAD`.
-
-If the worktree is dirty or has no commit, ABox creates a private ephemeral
-snapshot under the mode-`0700` session directory. It copies tracked files and
-non-ignored untracked regular files, preserves executable bits, reflects
-tracked modifications and deletions, initializes a private Git repository,
-and creates a private baseline commit. It does not modify the host Git
-repository.
-
-Untracked ignored files are excluded. Tracked files remain part of the
-snapshot even when an ignore rule matches them. The dirty-tree copy path
-rejects symlinks, symlinked directories, and unsupported special files. A
-directory that is not inside a Git worktree is not currently supported.
+ABox requires a readable directory. It includes regular files, dotfiles, and
+empty directories, preserves executable bits, excludes files or directories
+named `.git`, and rejects symlinks and unsupported special files. The snapshot
+is bounded to the same entry, per-file, and total-byte limits enforced by the
+guest extractor. Host Git and host Git configuration are not required.
 
 ### 9.2 Transfer
 
-The host archives the selected clean or ephemeral baseline with a narrowly
-constrained Git operation and streams bounded chunks over authenticated RPC.
+The host creates a bounded tar snapshot directly with the Go standard library
+and streams bounded chunks over authenticated RPC.
 
 The guest extraction code must reject:
 
@@ -621,17 +613,13 @@ mounted or copied as a live writable repository.
 
 ### 9.4 Resume and Future Import
 
-Resume boots the existing session `root.raw` and does not recopy the host
-worktree.
+Resume boots the existing session `root.raw` by explicit session id and does
+not recopy the host source directory.
 
 Guest patch export is implemented, but host patch review and import are not.
-Before import is added, clean snapshots may use `HEAD` and worktree-cleanliness
-rechecks. Ephemeral dirty snapshots require a recorded source manifest and a
-design that distinguishes pre-existing host changes from agent changes.
-Current code must not claim safe dirty-tree import.
-
-Starting another session from a dirty worktree is supported; the former rule
-that the user must commit or stash before the next session is obsolete.
+Before import is added, the host needs a recorded source manifest and a design
+that detects source-directory changes after the initial snapshot. Current code
+must not claim safe host import.
 
 ## 10. Host-Guest Protocol
 
@@ -909,13 +897,12 @@ turn.
 
 **Current status:** Basic same-disk session resume is implemented. The guest
 persists conversation messages in `/var/lib/abox/context.json`; the host stores
-`session.json` and, for the TUI, `transcript.json`. CLI `--resume` and SDK
-`Resume` boot the existing `root.raw` without recopying the repository. This
-is not yet the append-only normalized event store, inspectable memory system,
-checkpoint bundle, approval restoration, retention policy, or corruption
-recovery specified below. Explicit-ID resume works for ephemeral dirty
-snapshots, but automatic latest-for-repository matching needs correction
-because current session metadata records the private snapshot root.
+`session.json` and, for the TUI, `transcript.json`. CLI `--resume <id>` and SDK
+`Resume` boot the existing `root.raw` without recopying the source directory.
+Resume always requires an explicit session id; it is not inferred from the
+current directory or any Git state. This is not yet the append-only normalized
+event store, inspectable memory system, checkpoint bundle, approval
+restoration, retention policy, or corruption recovery specified below.
 
 The first milestone must persist sessions and useful memory without a resident
 daemon or heavyweight database service.
@@ -1284,8 +1271,7 @@ The patch-review screen provides:
 - Patch statistics
 - Reject and import actions
 - A final explicit import confirmation modal
-- After import, a notice that the host worktree is now dirty; another session
-  may use the dirty-tree ephemeral snapshot path
+- After import, a notice that the host source directory has changed
 
 The default action must be non-destructive. Cancellation or terminal closure
 must not import the patch.
@@ -1366,11 +1352,10 @@ Before review, the host validates:
 - Patch size and file-count limits
 - Relative paths
 - No traversal
-- No writes outside the repository
+- No writes outside the source directory
 - No unsupported file modes or special files
-- For a clean baseline, captured `HEAD` and worktree cleanliness still match
-- For an ephemeral dirty baseline, a recorded source manifest still matches
-  and pre-existing changes are distinguished from guest changes
+- The recorded source manifest still matches and host changes made after the
+  snapshot are distinguished from guest changes
 - Patch applies cleanly in check mode
 
 ### 16.3 Review and Confirmation
@@ -1382,14 +1367,14 @@ repository unchanged.
 
 ### 16.4 Import
 
-The host may use a fixed Git executable invocation or a suitable Go library to
-apply the reviewed patch. If Git is used:
+The host uses a bounded patch applier that does not require the source directory
+to be a Git checkout:
 
 - No shell is involved.
 - The executable and arguments are fixed by trusted code.
 - The patch is supplied through a controlled file or standard input.
 - Model-generated data cannot add command-line options.
-- The repository root is the captured trusted path.
+- The source directory is the captured trusted path.
 
 Host patch import is an explicit exception to the guest-only effect rule
 because it is a reviewed user action owned by the trusted control plane.
@@ -1751,23 +1736,20 @@ Exit criteria:
 - Device inspection shows no network device and no host-path filesystem
   share.
 
-### Phase 7: Repository Transfer
+### Phase 7: Source Transfer
 
-- Support clean committed snapshots through `git archive HEAD`.
-- Support dirty and unborn Git worktrees through a private ephemeral baseline.
-- Include tracked and non-ignored untracked regular files; preserve tracked
-  modifications, deletions, and executable bits.
-- Reject submodules and unsafe or unsupported file types.
+- Snapshot exactly the selected host directory without requiring host Git.
+- Include regular files, dotfiles, and empty directories; preserve executable
+  bits and exclude `.git` metadata.
+- Reject symlinks and unsafe or unsupported file types.
 - Stream and safely extract the selected snapshot in the guest.
 - Initialize the private guest baseline.
 - Verify guest changes do not change host files.
 
 Exit criteria:
 
-- Clean, dirty, and unborn Git worktrees transfer correctly.
-- Non-Git directories, submodules, unsafe symlinks, and malicious archive
-  paths fail clearly.
-- Ignored untracked files do not enter the snapshot.
+- Plain directories and directories containing Git metadata transfer correctly.
+- Unsafe symlinks, special files, and malicious archive paths fail clearly.
 - Malicious archive-path tests are rejected.
 
 ### Phase 8: Providers
@@ -2203,8 +2185,8 @@ These phases require separate ADRs and threat-model updates.
 - The first host is Apple Silicon running a supported modern macOS release.
 - The host supports Hypervisor.framework and permits hardware virtualization.
 - The first guest can be ARM64 Linux.
-- Repositories use Git and may begin clean, dirty, or without a commit;
-  non-Git directories are not currently supported.
+- Source directories do not require Git. Host Git metadata and state do not
+  participate in snapshotting or session identity.
 - Provider HTTPS originates from the trusted host broker; the model loop and
   request construction remain in the guest.
 - The guest has no NIC in every first-milestone connectivity mode.
@@ -2215,10 +2197,10 @@ These phases require separate ADRs and threat-model updates.
   these modes changes the guest device plan.
 - Planned package adapters will use origin rewrite rather than HTTP(S) proxy
   variables; no package adapter exists today.
-- Users accept that untracked ignored local files are not present in an
-  ephemeral snapshot. Tracked files remain included.
+- Users accept that regular files in the selected source directory are included
+  regardless of Git ignore rules, except `.git` metadata itself.
 - Users accept that the initial image has a limited toolchain set.
-- Users accept that a successful patch import leaves a dirty host worktree.
+- Users accept that a successful future patch import modifies the host source directory.
 - The host and local administrator are trusted.
 - The guest, model output, generated code, repository content, and
   repo-sourced instruction files are untrusted. Host configuration is the
@@ -2239,8 +2221,7 @@ Resolved decisions:
 - Current documented runtime: libkrun 1.19.4-style API
 - Current guest launch: `krun_set_exec`
 - Current remote MCP path: host Streamable HTTP broker
-- Current repository path: clean `HEAD` archive or dirty/unborn ephemeral Git
-  snapshot
+- Current source path: bounded filesystem snapshot of the exact configured directory
 
 Still open or incomplete:
 
@@ -2262,7 +2243,6 @@ Still open or incomplete:
 - Context accounting and compaction
 - Scoped `AGENTS.md`, global instructions, and skills
 - Full append-only session events and inspectable memory
-- Correct latest-for-repository resume association for ephemeral snapshots
 - MCP approval and guest-local stdio MCP
 - Patch review and host import, including safe dirty-baseline handling
 - Cold checkpoint, rollback, fork, lineage, and lifecycle UI

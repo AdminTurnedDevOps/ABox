@@ -16,8 +16,7 @@ permalink: /cli/
 ## Commands
 
 ```bash
-abox                              # TUI, new session for this repo
-abox --resume                     # latest session for this repo
+abox                              # TUI, new session from the current directory
 abox --resume <id>                # that session's root.raw
 abox --model grok-default         # profile name from config.yaml
 abox --probe-vm                   # boot + list_files; no model call
@@ -31,6 +30,9 @@ abox creds migrate                # credentials.env → macOS keychain
 Headless uses the same agent, broker, and approval paths as the TUI. There
 is no TUI approver, so model-authored `run_command` is **denied**. See
 [Approvals]({{ '/approvals' | relative_url }}).
+
+New sessions print their id. Resume always requires that id and does not use
+the current directory, Git repository, branch, or `HEAD` to choose a session.
 
 `--probe-vm` does not need a provider key. It is also the only path that
 will still talk to a pre-protocol-4 guest (list files only).

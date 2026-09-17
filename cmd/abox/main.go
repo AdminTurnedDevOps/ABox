@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,7 +49,7 @@ func run() error {
 	prompt := fs.String("prompt", "", "prompt for exec mode")
 	modelName := fs.String("model", "", "configured model profile name")
 	probeVM := fs.Bool("probe-vm", false, "boot the guest and list files; no model call")
-	resume := fs.Bool("resume", false, "resume a previous session for this repository (same root.raw and conversation)")
+	resumeID := fs.String("resume", "", "resume the session with this id (same root.raw and conversation)")
 	args := os.Args[1:]
 	execMode := false
 	if len(args) > 0 && args[0] == "exec" {
@@ -62,6 +61,9 @@ func run() error {
 	}
 	if *execFlag {
 		execMode = true
+	}
+	if len(fs.Args()) > 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
 
 	cfg, cfgPath, err := config.Load()
@@ -76,49 +78,36 @@ func run() error {
 		return fmt.Errorf("no model profile %q (config %s)", *modelName, cfgPath)
 	}
 
-	wd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
 	if err := os.MkdirAll(config.SessionRoot(), 0o700); err != nil {
 		return err
 	}
 
-	resumeID := ""
-	if *resume {
-		if extra := fs.Args(); len(extra) > 0 {
-			resumeID = extra[0]
-		}
-	}
-
 	var sess *session.Session
-	var snap repository.Snapshot
-	if *resume {
-		loaded, err := loadResumeSession(wd, resumeID)
+	var archive []byte
+	resuming := strings.TrimSpace(*resumeID) != ""
+	if resuming {
+		loaded, err := session.Load(strings.TrimSpace(*resumeID))
 		if err != nil {
 			return err
 		}
 		sess = loaded
 		fmt.Fprintf(os.Stderr, "abox: resuming session %s\n", sess.ID)
 	} else {
-		created, err := session.Create(wd, "pending")
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		sourceDir, data, err := repository.ArchiveDirectory(wd)
+		if err != nil {
+			return err
+		}
+		archive = data
+		created, err := session.Create(sourceDir)
 		if err != nil {
 			return err
 		}
 		sess = created
-		opened, err := repository.OpenForSession(wd, filepath.Join(sess.Dir, "host-tree"))
-		if err != nil {
-			return err
-		}
-		snap = opened
-		sess.RepoRoot = snap.Root
-		sess.HEAD = snap.HEAD
-		if err := sess.WriteMeta(); err != nil {
-			return err
-		}
-		if snap.Ephemeral {
-			fmt.Fprintf(os.Stderr, "abox: no clean committed worktree; using an ephemeral snapshot. host git is unchanged.\n")
-		}
+		fmt.Fprintf(os.Stderr, "abox: created session %s\n", sess.ID)
 	}
 
 	var sb *runtime.Sandbox
@@ -128,7 +117,7 @@ func run() error {
 	if image == "" {
 		image = config.GuestImagePath()
 	}
-	if err := runtime.Prepare(sess, image, sel, *resume); err != nil {
+	if err := runtime.Prepare(sess, image, sel, resuming); err != nil {
 		if execMode {
 			return err
 		}
@@ -147,7 +136,7 @@ func run() error {
 			vmState = "failed"
 		} else {
 			if started.GuestProtocol < 2 {
-				if *resume {
+				if resuming {
 					started.Stop()
 					return fmt.Errorf("cannot resume protocol-1 session %s after secretless config rewrite; rebuild the guest image and start a new session", sess.ID)
 				}
@@ -175,13 +164,9 @@ func run() error {
 				}
 				fmt.Fprintf(os.Stderr, "abox: %v\n", err)
 			}
-			if !*resume {
-				archive, err := repository.ArchiveHEAD(snap.Root)
-				if err != nil {
-					return err
-				}
+			if !resuming {
 				if err := sb.TransferArchive(context.Background(), archive); err != nil {
-					fmt.Fprintf(os.Stderr, "abox: repo transfer: %v\n", err)
+					return fmt.Errorf("source transfer: %w", err)
 				}
 			}
 		}
@@ -205,7 +190,7 @@ func run() error {
 		return runExec(sb, *prompt)
 	}
 	var transcript []string
-	if *resume {
+	if resuming {
 		transcript = resumeLog(sess, sb)
 		if len(transcript) > 0 {
 			_ = session.WriteTranscript(sess.TranscriptPath(), transcript)
@@ -296,21 +281,6 @@ func runExec(sb *runtime.Sandbox, prompt string) error {
 		_ = enc.Encode(e)
 	})
 	return err
-}
-
-func loadResumeSession(wd, id string) (*session.Session, error) {
-	if id != "" {
-		return session.Load(id)
-	}
-	abs, err := filepath.Abs(wd)
-	if err != nil {
-		abs = wd
-	}
-	roots := []string{abs}
-	if top, err := repository.TopLevel(wd); err == nil {
-		roots = append(roots, top)
-	}
-	return session.LatestForRepo(roots...)
 }
 
 func runMCP(args []string) error {

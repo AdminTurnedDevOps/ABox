@@ -20,7 +20,7 @@ missing).
 
 ```bash
 abox                          # new session; hello history is empty
-abox --resume                 # same conversation in the TUI
+abox --resume <id>            # same conversation in the TUI
 ```
 
 `abox exec` is one prompt; it does not dump history.

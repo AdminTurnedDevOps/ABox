@@ -17,12 +17,11 @@ type Session struct {
 	ID         string    `json:"id"`
 	Capability string    `json:"capability"`
 	Created    time.Time `json:"created"`
-	RepoRoot   string    `json:"repo_root"`
-	HEAD       string    `json:"head"`
+	SourceDir  string    `json:"source_dir,omitempty"`
 	Dir        string    `json:"dir"`
 }
 
-func Create(repoRoot, head string) (*Session, error) {
+func Create(sourceDir string) (*Session, error) {
 	id, err := randomHex(16)
 	if err != nil {
 		return nil, err
@@ -42,8 +41,7 @@ func Create(repoRoot, head string) (*Session, error) {
 		ID:         id,
 		Capability: cap,
 		Created:    time.Now().UTC(),
-		RepoRoot:   repoRoot,
-		HEAD:       head,
+		SourceDir:  sourceDir,
 		Dir:        dir,
 	}
 	if err := s.WriteMeta(); err != nil {
@@ -53,8 +51,8 @@ func Create(repoRoot, head string) (*Session, error) {
 }
 
 func Load(id string) (*Session, error) {
-	if id == "" {
-		return nil, fmt.Errorf("empty session id")
+	if !validID(id) {
+		return nil, fmt.Errorf("invalid session id %q", id)
 	}
 	dir := filepath.Join(config.SessionRoot(), id)
 	data, err := os.ReadFile(filepath.Join(dir, "session.json"))
@@ -71,59 +69,6 @@ func Load(id string) (*Session, error) {
 		return nil, fmt.Errorf("session %s: missing root.raw", id)
 	}
 	return &s, nil
-}
-
-// LatestForRepo returns the newest session whose RepoRoot matches any of roots
-// and that still has a root.raw disk.
-func LatestForRepo(roots ...string) (*Session, error) {
-	want := map[string]struct{}{}
-	for _, r := range roots {
-		if r == "" {
-			continue
-		}
-		abs, err := filepath.Abs(r)
-		if err != nil {
-			abs = filepath.Clean(r)
-		}
-		want[abs] = struct{}{}
-		want[filepath.Clean(r)] = struct{}{}
-	}
-	if len(want) == 0 {
-		return nil, fmt.Errorf("no repository root to match")
-	}
-	entries, err := os.ReadDir(config.SessionRoot())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("no sessions to resume")
-		}
-		return nil, err
-	}
-	var best *Session
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		s, err := Load(e.Name())
-		if err != nil {
-			continue
-		}
-		root := s.RepoRoot
-		if abs, err := filepath.Abs(root); err == nil {
-			root = abs
-		}
-		if _, ok := want[root]; !ok {
-			if _, ok := want[filepath.Clean(s.RepoRoot)]; !ok {
-				continue
-			}
-		}
-		if best == nil || s.Created.After(best.Created) {
-			best = s
-		}
-	}
-	if best == nil {
-		return nil, fmt.Errorf("no session to resume for this repository")
-	}
-	return best, nil
 }
 
 func (s *Session) WriteMeta() error {
@@ -220,4 +165,12 @@ func randomHex(n int) (string, error) {
 		return "", fmt.Errorf("rand: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+func validID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil
 }

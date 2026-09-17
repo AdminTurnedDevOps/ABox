@@ -5,14 +5,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 )
 
 func TestWriteGuestConfigExcludesMCPAndSecrets(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	s, err := Create("/repo", "deadbeef")
+	s, err := Create("/source")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +73,7 @@ func TestWritePaddedConfigLayout(t *testing.T) {
 
 func TestLoadRequiresRootRaw(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	s, err := Create("/repo/a", "h1")
+	s, err := Create("/source/a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,60 +87,14 @@ func TestLoadRequiresRootRaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != s.ID || got.RepoRoot != "/repo/a" {
+	if got.ID != s.ID || got.SourceDir != "/source/a" {
 		t.Fatalf("%#v", got)
-	}
-}
-
-func TestLatestForRepoPicksNewestMatching(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	old, err := Create("/repo/app", "h1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(old.RootDisk(), []byte("a"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	other, err := Create("/repo/other", "h2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(other.RootDisk(), []byte("b"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	newer, err := Create("/repo/app", "h3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(newer.RootDisk(), []byte("c"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := LatestForRepo("/repo/app")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.ID != newer.ID {
-		t.Fatalf("got %s want %s", got.ID, newer.ID)
-	}
-}
-
-func TestLatestForRepoSkipsMissingDisk(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	s, err := Create("/repo/app", "h1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = s
-	if _, err := LatestForRepo("/repo/app"); err == nil {
-		t.Fatal("expected error when root.raw missing")
 	}
 }
 
 func TestTranscriptRoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	s, err := Create("/repo", "h")
+	s, err := Create("/source")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,12 +118,11 @@ func TestReadTranscriptMissing(t *testing.T) {
 	}
 }
 
-func TestLatestForRepoNone(t *testing.T) {
+func TestLoadRejectsInvalidSessionID(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if err := os.MkdirAll(config.SessionRoot(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LatestForRepo(filepath.Join(t.TempDir(), "nope")); err == nil {
-		t.Fatal("expected no session error")
+	for _, id := range []string{"", "../outside", "not-hex", strings.Repeat("a", 31)} {
+		if _, err := Load(id); err == nil {
+			t.Fatalf("expected %q to be rejected", id)
+		}
 	}
 }

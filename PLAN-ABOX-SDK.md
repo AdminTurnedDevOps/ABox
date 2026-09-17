@@ -2,7 +2,12 @@
 
 ## Context
 
-ABox's host orchestration is already SDK-shaped — `cmd/abox/main.go` composes `config.Load` → `session.Create/LatestForRepo` → `repository.OpenForSession/ArchiveHEAD` → `runtime.Prepare/Start` → `Sandbox.UserTurn(ctx, prompt, onEvent)` — but it is all locked behind `internal/` and consumable only via the CLI. Goal: a public Go SDK package so other Go programs can embed ABox (spawn a microVM-isolated agent session, stream events, cancel turns, read usage/cost metadata), per user decisions:
+ABox's host orchestration is already SDK-shaped: `cmd/abox/main.go` composes
+configuration, session creation or ID-based loading, source-directory
+snapshotting, VM startup, and `Sandbox.UserTurn`. The goal is a public Go SDK
+package so other Go programs can embed ABox (spawn a microVM-isolated agent
+session, stream events, cancel turns, and read usage metadata), per user
+decisions:
 
 - **Scope: full v0.2** — extraction + configurable turn options + mid-turn cancellation + richer result metadata (token usage, stop reason, tool args/IDs).
 - **Purely additive to the CLI** — `cmd/abox`, `internal/tui`, `cmd/abox-vmm` untouched. The v0.2 features require *additive* changes to `protocol`, `cmd/abox-guest`, `internal/agent`, `internal/provider`, `internal/runtime`, `internal/guest/tools` (new fields/methods only; existing signatures and behavior preserved). Golden image rebuild via existing `make image-update` is a required deploy step.
@@ -44,8 +49,8 @@ type Options struct {
     BootTimeout  time.Duration // default 45s (matches CLI)
 }
 
-func Open(ctx context.Context, opts Options) (*Session, error)          // new session: snapshot repo, clone disk, boot, transfer archive
-func Resume(ctx context.Context, sessionID string, opts Options) (*Session, error) // "" = latest for repo (session.LatestForRepo via repository.TopLevel)
+func Open(ctx context.Context, opts Options) (*Session, error)          // new session: snapshot source directory, clone disk, boot, transfer archive
+func Resume(ctx context.Context, sessionID string, opts Options) (*Session, error) // non-empty session id required
 
 type Session struct { /* wraps *runtime.Sandbox + *session.Session */ }
 func (s *Session) ID() string
@@ -127,7 +132,7 @@ The docs should be built in GitHub Pages
 2. `make build && make image-update` (rebuild guest binary onto golden image).
 3. `abox --probe-vm` — CLI still works (untouched code path, proves no internal regression).
 4. `go run ./examples/sdk-basic` in a test repo with a provider key: full turn streams events, usage populated; Ctrl+C mid-turn → clean cancel, VM shuts down.
-5. Resume an SDK session (`Resume("")`) — degrades or works per guest version.
+5. Resume an SDK session by id — degrades or works per guest version.
 6. Manual TUI smoke test (`abox`, one prompt) — behavior identical to pre-change.
 
 ## Execution order

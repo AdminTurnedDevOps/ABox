@@ -24,7 +24,8 @@ func Resume(ctx context.Context, sessionID string, opts Options) (*Session, erro
 func (s *Session) Close() error
 ```
 
-`Resume("", opts)` picks the latest session for `opts.RepoPath`.
+`Resume` requires a non-empty session id. Session selection is independent of
+`opts.RepoPath`, the current directory, and host Git state.
 
 Both require a protocol-4 guest. Older disks return `ErrGuestTooOld`.
 `Open` also scrubs leftover plaintext secrets out of `~/.abox/sessions`
@@ -36,7 +37,7 @@ Always `defer sess.Close()`. `Close` stops the VM and the host broker.
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `RepoPath` | `string` | cwd |
+| `RepoPath` | `string` | cwd; exact source directory snapshotted by `Open` |
 | `Model` | `string` | first profile in `config.yaml` |
 | `Image` | `string` | config / `~/.abox/images/abox-guest.raw` |
 | `VMMPath` | `string` | config or `abox-vmm` on `PATH` |

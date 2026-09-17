@@ -47,8 +47,9 @@ You can also write `~/.abox/credentials.env` yourself with `XAI_API_KEY=…`
 
 ## First program
 
-One import: `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Work from any git
-repo (the SDK snapshots that tree into the guest).
+One import: `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Work from any
+directory; the SDK snapshots exactly that directory into the guest without
+requiring or inspecting host Git.
 
 ```bash
 go get github.com/AdminTurnedDevOps/ABox@latest

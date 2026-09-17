@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -50,11 +49,20 @@ func Open(ctx context.Context, opts Options) (*Session, error) {
 }
 
 func Resume(ctx context.Context, sessionID string, opts Options) (*Session, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
 	return open(ctx, opts, true, sessionID)
 }
 
 func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Session, error) {
-	opts = opts.withDefaults()
+	if resume {
+		if opts.BootTimeout == 0 {
+			opts.BootTimeout = 45 * time.Second
+		}
+	} else {
+		opts = opts.withDefaults()
+	}
 	n, scrubErr := session.ScrubSecretsEverywhere()
 	if n > 0 {
 		fmt.Fprintf(os.Stderr, "abox: scrubbed plaintext secrets from %d old session(s)\n", n)
@@ -78,33 +86,27 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 	}
 
 	var sess *session.Session
-	var snap repository.Snapshot
+	var archive []byte
 	if resume {
-		loaded, err := loadResume(opts.RepoPath, resumeID)
+		loaded, err := session.Load(resumeID)
 		if err != nil {
 			resolver.Close()
 			return nil, err
 		}
 		sess = loaded
 	} else {
-		created, err := session.Create(opts.RepoPath, "pending")
+		sourceDir, data, err := repository.ArchiveDirectory(opts.RepoPath)
+		if err != nil {
+			resolver.Close()
+			return nil, fmt.Errorf("snapshot source directory: %w", err)
+		}
+		archive = data
+		created, err := session.Create(sourceDir)
 		if err != nil {
 			resolver.Close()
 			return nil, fmt.Errorf("create session: %w", err)
 		}
 		sess = created
-		opened, err := repository.OpenForSession(opts.RepoPath, filepath.Join(sess.Dir, "host-tree"))
-		if err != nil {
-			resolver.Close()
-			return nil, fmt.Errorf("snapshot repo: %w", err)
-		}
-		snap = opened
-		sess.RepoRoot = snap.Root
-		sess.HEAD = snap.HEAD
-		if err := sess.WriteMeta(); err != nil {
-			resolver.Close()
-			return nil, err
-		}
 	}
 
 	image := opts.Image
@@ -158,16 +160,10 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 	}
 	sb.SetGuestCallHandler(broker)
 	if !resume {
-		archive, err := repository.ArchiveHEAD(snap.Root)
-		if err != nil {
-			sb.Stop()
-			resolver.Close()
-			return nil, fmt.Errorf("archive repo: %w", err)
-		}
 		if err := sb.TransferArchive(ctx, archive); err != nil {
 			sb.Stop()
 			resolver.Close()
-			return nil, fmt.Errorf("transfer repo: %w", err)
+			return nil, fmt.Errorf("transfer source directory: %w", err)
 		}
 	}
 	return &Session{cfg: cfg, sess: sess, sb: sb, sel: sel, resolver: resolver, broker: broker}, nil
@@ -182,21 +178,6 @@ func credentialStartupError(resolveErr, pushErr error) error {
 		errs = append(errs, fmt.Errorf("push resolved credentials: %w", pushErr))
 	}
 	return errors.Join(errs...)
-}
-
-func loadResume(repoPath, id string) (*session.Session, error) {
-	if id != "" {
-		return session.Load(id)
-	}
-	abs, err := filepath.Abs(repoPath)
-	if err != nil {
-		abs = repoPath
-	}
-	roots := []string{abs}
-	if top, err := repository.TopLevel(repoPath); err == nil {
-		roots = append(roots, top)
-	}
-	return session.LatestForRepo(roots...)
 }
 
 type Event = protocol.AgentEvent

@@ -124,7 +124,7 @@ New: `Sandbox.PushSecrets(ctx, model, secrets)` — for protocol 2, `set_model` 
 
 ### 2.3 Scrub existing session dirs
 New: `internal/session/scrub.go` (+test). `ScrubSecrets(root)` — surgical, never deletes sessions:
-1. Walk `sessions/<id>/` (pattern from `LatestForRepo`, session.go:94).
+1. Walk each directory beneath `sessions/`.
 2. `guest-config.json`: unmarshal to `map[string]json.RawMessage` (preserves unknown fields); no `"secrets"` key → skip (idempotent); else delete key, tmp+rename write, 0600.
 3. `config.raw`: chmod 0600 → write scrubbed JSON zero-padded to 1 MiB → chmod 0400. Extract the pad-write body of `writeConfigDisk` (runtime.go:84-95) into shared `session.WritePaddedConfig` and have runtime reuse it (runtime already imports session).
 4. root.raw / transcript.json / console.log / session.json untouched.

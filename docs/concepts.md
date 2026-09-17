@@ -112,9 +112,15 @@ Model-authored `run_command` asks the host before exec. Default is deny.
 Host-initiated `Session.RunCommand` / `abox --probe-vm` are supervisor RPCs,
 not model tool calls, and do not go through that gate.
 
-## Repo snapshot
+## Source snapshot
 
-`Open` prefers a clean committed Git worktree and tars `HEAD` into the guest.
-If Git is missing, dirty, or has no commits, ABox copies the files into a
-private snapshot and leaves host Git alone. Submodules are not supported.
-`Resume` does not recopy the host tree (that would overwrite guest work).
+`Open` snapshots exactly the configured source directory into the guest. It
+does not discover a Git root, inspect branches or `HEAD`, or require Git on the
+host. `.git` files and directories are excluded, and symlinks and special files
+are rejected. The guest creates its own private Git baseline after transfer so
+patch export remains available. `Resume(id)` boots the existing disk and does
+not recopy the host source directory.
+
+Git ignore rules do not control this snapshot. All regular files and dotfiles
+other than `.git` metadata are included, so the selected source directory must
+contain only files the guest is allowed to read.

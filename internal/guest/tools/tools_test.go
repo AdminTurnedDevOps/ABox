@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,5 +100,30 @@ func TestListAndRead(t *testing.T) {
 	content, bin, _, err := r.Read("a.txt", 100)
 	if err != nil || bin || content != "hello" {
 		t.Fatalf("read %q bin=%v err=%v", content, bin, err)
+	}
+}
+
+func TestInitBaselineTracksFilesIgnoredBySourceRules(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(dir, "local.env")
+	if err := os.WriteFile(secret, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Repo{Root: dir}
+	if err := r.InitBaseline(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("after\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patch, _, err := r.ExportPatch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(patch, "local.env") || !strings.Contains(patch, "+after") {
+		t.Fatalf("ignored source file was not tracked in guest baseline:\n%s", patch)
 	}
 }

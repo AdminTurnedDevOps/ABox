@@ -47,12 +47,12 @@ The SDK boots the same microVM as the CLI. A current guest speaks **protocol 4**
 
 | Capability | Detail |
 | --- | --- |
-| Session | Clone golden disk, boot libkrun, snapshot repo into `/work/repo` |
+| Session | Snapshot a source directory, clone the golden disk, and boot libkrun |
 | Turn | Stream `text` / `tool` / `result` / `done` events; optional usage |
 | Cancel | `ctx` cancel → `cancel_turn`; kills in-flight `run_command` |
 | Tools | Guest `list_files`, `read_file`, `search`, `apply_patch`, `run_command` + host-brokered MCP |
 | Approvals | `SetApprover` for model-authored `run_command` (default deny) |
-| Resume | Boot an existing `root.raw` (`Resume`, same as `abox --resume`) |
+| Resume | Boot an existing `root.raw` by session id (`Resume`, same as `abox --resume <id>`) |
 | Probe | `ListFiles` / `ReadFile` / `RunCommand` without a model turn |
 
 ## What it does not do

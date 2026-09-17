@@ -33,7 +33,7 @@ on `PATH` (the `darwin_arm64` archive on the
 image and provider key: [Quickstart]({{ '/quickstart' | relative_url }}).
 Probe methods do not need a key. A successful `Open` speaks protocol 4.
 
-The CLI is `abox`, `abox --resume`, `abox --model`, `abox --probe-vm`,
+The CLI is `abox`, `abox --resume <id>`, `abox --model`, `abox --probe-vm`,
 `abox exec --prompt`, `abox mcp add` / `mcp login`, and `abox creds migrate`.
 There are no extra flags for `ReadFile`, `RunCommand`, `ExportPatch`,
 `MaxTurns`, or live `SetMCPTokens` — those stay on the SDK page as
@@ -42,7 +42,7 @@ SDK-only. Full command list: [CLI and TUI]({{ '/cli' | relative_url }}).
 | Call | Sample | CLI |
 | --- | --- | --- |
 | `Open` + `Turn` | [Basic turn]({{ '/examples/basic' | relative_url }}) | `abox`, `abox exec --prompt` |
-| `Resume` | [Resume]({{ '/examples/resume' | relative_url }}) | `abox --resume` |
+| `Resume` | [Resume]({{ '/examples/resume' | relative_url }}) | `abox --resume <id>` |
 | `Turn` + canceled `ctx` | [Cancel]({{ '/examples/cancel' | relative_url }}) | Ctrl+C |
 | `TurnOpts` | [Turn options]({{ '/examples/turn-opts' | relative_url }}) | SDK-only (`MaxTurns` / `Timeout`) |
 | `ListFiles` | [List files]({{ '/examples/list-files' | relative_url }}) | `abox --probe-vm` |
@@ -54,7 +54,7 @@ SDK-only. Full command list: [CLI and TUI]({{ '/cli' | relative_url }}).
 | `Turn` events | [Print events]({{ '/examples/print-events' | relative_url }}) | `abox exec --prompt` |
 | `Capabilities` | [Capabilities]({{ '/examples/capabilities' | relative_url }}) | protocol 4 required |
 | `Options` | [Custom VM]({{ '/examples/custom-vm' | relative_url }}) | `~/.abox/config.yaml` |
-| `ErrGuestTooOld` | [Errors]({{ '/examples/errors' | relative_url }}) | `abox --resume` of an old disk |
-| `History` | [History]({{ '/examples/history' | relative_url }}) | `abox --resume` |
+| `ErrGuestTooOld` | [Errors]({{ '/examples/errors' | relative_url }}) | `abox --resume <id>` of an old disk |
+| `History` | [History]({{ '/examples/history' | relative_url }}) | `abox --resume <id>` |
 | `Turn` twice | [Multi-turn]({{ '/examples/multi-turn' | relative_url }}) | `abox` (TUI) |
 | `SetMCPTokens` | [MCP tokens]({{ '/examples/mcp-tokens' | relative_url }}) | `abox mcp add` / `mcp login` |
