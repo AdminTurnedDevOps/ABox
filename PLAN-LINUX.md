@@ -434,10 +434,3 @@ sound are compiled in. ABox uses neither; this is dependency weight only.
 11. **Cross-platform regression:** the same suite still passes on Apple Silicon,
    including `security(1)` keychain storage.
 
-## Status
-
-Not started. No code in this plan has been implemented; the findings table
-records read-only verification against installed-ready packages, the pinned
-`x/sys` module, and the live Secret Service on the dev host. No secret was
-written to any keystore during planning. Linux isolation claims remain
-**Planned** per Global decision 7.
