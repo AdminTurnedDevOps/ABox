@@ -23,19 +23,15 @@ func main() {
 	fmt.Println("missing image:", err)
 
 	sess, err := abox.Open(ctx, abox.Options{})
+	if errors.Is(err, abox.ErrGuestTooOld) {
+		fmt.Println("rebuild guest: make build && make image-update, then Open a new session")
+		fmt.Println(err)
+		return
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	defer sess.Close()
-	if sess.Capabilities().Protocol >= 2 {
-		fmt.Println("guest is protocol 2; ErrGuestTooOld will not fire")
-		return
-	}
-	_, err = sess.TurnOpts(ctx, "hi", abox.TurnOpts{MaxTurns: 2}, nil)
-	if !errors.Is(err, abox.ErrGuestTooOld) {
-		fmt.Println("expected ErrGuestTooOld, got", err)
-		os.Exit(1)
-	}
-	fmt.Println("v1 guest:", err)
+	fmt.Printf("guest is protocol %d; Open already rejected older disks\n", sess.Capabilities().Protocol)
 }

@@ -17,8 +17,9 @@ func main() {
 	}
 	defer sess.Close()
 	c := sess.Capabilities()
-	fmt.Printf("protocol=%d cancel=%v rich=%v turn_opts=%v\n", c.Protocol, c.Cancel, c.RichEvents, c.TurnOptions)
-	if c.Protocol < 2 {
+	fmt.Printf("protocol=%d cancel=%v rich=%v turn_opts=%v approvals=%v mcp_broker=%v\n",
+		c.Protocol, c.Cancel, c.RichEvents, c.TurnOptions, c.Approvals, c.MCPBroker)
+	if c.Protocol < 4 {
 		fmt.Fprintln(os.Stderr, "rebuild guest: make build && make image-update, then Open a new session")
 		os.Exit(1)
 	}

@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Examples
-nav_order: 8
+nav_order: 12
 has_children: true
 permalink: /examples/
 ---
@@ -10,7 +10,7 @@ permalink: /examples/
 
 There is **one** Go SDK: [`github.com/AdminTurnedDevOps/ABox/pkg/abox`]({{ '/api' | relative_url }}).
 `Open` a session, then call methods on it — `Turn`, `RunCommand`, `ListFiles`,
-cancel via `context`, and so on. You do not add a package per feature.
+cancel via `context`, `SetApprover`, and so on. You do not add a package per feature.
 
 ```bash
 go get github.com/AdminTurnedDevOps/ABox@latest
@@ -21,6 +21,7 @@ import "github.com/AdminTurnedDevOps/ABox/pkg/abox"
 
 sess, err := abox.Open(ctx, abox.Options{})
 // sess.Turn(...)
+// sess.SetApprover(...)
 // sess.RunCommand(ctx, "uname -a", 15)
 // sess.ListFiles(ctx, ".", 4, 50)
 ```
@@ -29,7 +30,7 @@ Each child page is a sample `main` that calls one of those methods. Copy it
 into your program. `abox-vmm` on `PATH` (the `darwin_arm64` archive on the
 [GitHub release](https://github.com/AdminTurnedDevOps/ABox/releases)). Golden
 image and provider key: [Quickstart]({{ '/quickstart' | relative_url }}).
-Probe methods do not need a key.
+Probe methods do not need a key. A successful `Open` speaks protocol 4.
 
 | Call | Sample |
 | --- | --- |
@@ -40,6 +41,7 @@ Probe methods do not need a key.
 | `ListFiles` | [List files]({{ '/examples/list-files' | relative_url }}) |
 | `ReadFile` | [Read file]({{ '/examples/read-file' | relative_url }}) |
 | `RunCommand` | [Run command]({{ '/examples/run-command' | relative_url }}) |
+| `SetApprover` | [Approvals]({{ '/examples/approvals' | relative_url }}) |
 | `ExportPatch` | [Export patch]({{ '/examples/export-patch' | relative_url }}) |
 | `SetModel` | [Set model]({{ '/examples/set-model' | relative_url }}) |
 | `Turn` events | [Print events]({{ '/examples/print-events' | relative_url }}) |

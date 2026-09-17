@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Events
-nav_order: 6
+nav_order: 10
 permalink: /events/
 ---
 
@@ -36,11 +36,15 @@ sess.Turn(ctx, prompt, func(ev abox.Event) {
 | --- | --- | --- |
 | `text` | `Text` | Incremental model output |
 | `tool` | `Tool`, `Status`, `Text`, `Err` | `ok` or `error`. Rich: `ToolID`, `ToolArgs` |
-| `result` | `Usage`, `StopReason` | Protocol 2, rich events |
-| `error` | `Err` | Provider or agent failure |
+| `result` | `Usage`, `StopReason` | Protocol 2+, rich events |
+| `error` | `Err` | Provider, agent, or broker failure |
 | `done` | | Turn finished (CLI also uses this) |
 
 `TurnResult` is filled from the `result` event when present, plus `Canceled`
 if the guest returned `code: canceled`.
+
+`run_command` approval is a host RPC, not an `Event`. Install
+`SetApprover` before `Turn` or the guest command is denied and you will see
+a `tool` event with an error. [Approvals]({{ '/approvals' | relative_url }}).
 
 See [print-events]({{ '/examples/print-events' | relative_url }}).

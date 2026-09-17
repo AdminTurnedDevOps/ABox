@@ -17,15 +17,16 @@ The agent, prompts, model calls, and tools runs in isolation.
 
 <p align="center">
   <a href="#quickstart">Quick Start</a> ·
-  <a href="https://adminturneddevops.github.io/ABox/">SDK docs</a> ·
+  <a href="https://adminturneddevops.github.io/ABox/">Docs</a> ·
   <a href="PLAN.md">Plan</a> ·
   <a href="LICENSE">License</a>
 </p>
 
 Right now, the industry is incredibly focused on agent sandboxes for production (servers, cloud, Kubernetes, etc), but the biggest security entry point are agents running locally on someone’s laptop.
 
-**Status:** experimental. Runnable today: guest agent (prompt, model call, tools) in a
-libkrun microVM on Apple Silicon, plus TUI and `/provider`.
+**Status:** experimental. Runnable today: guest agent (prompt, tools) in a
+libkrun microVM on Apple Silicon; host TUI/SDK, LLM/MCP brokers, and
+`run_command` approval. Protocol 4.
 
 ## Prerequisites
 
@@ -74,6 +75,8 @@ abox
 - `/provider` sets Grok, OpenAI, or Anthropic API keys
 - `/credential` points a model at Vault, Azure Key Vault, or AWS Secrets Manager
 - `/mcp` lists configured Streamable HTTP MCP servers and accepts a Bearer token (`abox mcp login` for OAuth)
+- `/help` lists slash commands
+- Model-authored `run_command` opens an approval prompt (deny is the default)
 - `abox --resume` reopens the latest session for this repo (same `root.raw`, LLM conversation, and TUI transcript). `abox --resume <id>` picks a session. Plain `abox` still starts a new session.
 - `ctrl+c` quits
 - The agent runs only inside the guest (MicroVM)
@@ -111,7 +114,7 @@ guest: /                                  Alpine + abox-guest + /work/repo
 
 host:  ~/.abox/sessions/<id>/config.raw   second file, read-only
          ↓
-guest: /dev/vdb                           sealed session config
+guest: /dev/vdb                           session id + model alias (no secrets)
 ```
 
 Swap the `.raw` and you change userspace. Swap libkrunfw and you change the
@@ -138,7 +141,7 @@ Clone of (1) for that run. This is /dev/vda → /. Repo, guest Git, agent writes
 ABox does not boot (1). It copies (1) → (2), then the microVM uses (2). --resume skips the copy and boots the existing (2).
 
 3. Config disk — sessions/<id>/config.raw
-~1 MiB, read-only /dev/vdb. Session id, model. Not cloned from the golden image, not an OS. It lives inside of the directory where your sandbox harness session lives.
+~1 MiB, read-only /dev/vdb. Session id and model alias. No API keys, no MCP URLs. Not cloned from the golden image, not an OS. It lives inside of the directory where your sandbox harness session lives.
 
 The VM boots **only** the session clone, not the golden file. Destroy a session directory and that run’s guest files are gone; the golden image stays clean for the next `abox`. `make image-update` patches `/usr/local/bin/abox-guest` on an existing golden disk; `make image` rebuilds the golden disk from scratch.
 
@@ -240,13 +243,13 @@ abox exec --prompt "list the repository files"
 
 ## LLM Integration
 
-ABox is an LLM **client/harness**. The model loop/context is not on the host (your ABox instance/harness running on your computer). Prompts, streaming, and tool calls run inside `abox-guest` in the microVM. Provider HTTPS is brokered by the host. The host TUI forwards your text over vsock (`user_turn`) and renders `agent_event` frames. That is the same isolation idea as MCP: the sandbox is the trust boundary for anything the model sees or starts.
+ABox is an LLM **client/harness**. The model loop/context is not on the host (your ABox instance/harness running on your computer). Prompts, tool calls, and guest tools run inside `abox-guest` in the microVM. Provider HTTPS and MCP HTTPS are brokered by the host. The guest never sees a credential, base URL, or MCP endpoint. The host TUI forwards your text over vsock (`user_turn`) and renders `agent_event` frames. That is the same isolation idea as MCP: the sandbox is the trust boundary for anything the model sees or starts.
 
 ```go
 func Stream(ctx context.Context, model config.Model, key string, client *http.Client, messages []Message, tools []ToolSchema) (<-chan Event, error)
 ```
 
-`Stream` talks to one configured profile. xAI and OpenAI use Chat Completions (`/chat/completions`). Anthropic uses Messages (`/v1/messages`). Provider-side shell, code execution, and file tools stay off. The model only sees ABox’s five guest tools plus any MCP tools discovered in the guest.
+`Stream` talks to one configured profile. xAI and OpenAI use Chat Completions (`/chat/completions`). Anthropic uses Messages (`/v1/messages`). Provider-side shell, code execution, and file tools stay off. The model only sees ABox’s five guest tools plus any MCP tools the host broker discovered.
 
 ![](img/prov1.png)
 ![](img/prov2.png)
@@ -276,9 +279,9 @@ models:
 
 Pick one in the TUI with `/provider`, or pass `--model grok-default` (and the other profile names) on `abox` / `abox exec`. Missing `XAI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` fails the turn, not VM boot (`abox --probe-vm` still works).
 
-Guest egress is allowlisted for configured MCP origins on HTTPS `:443` via libkrun TSI inet (no guest NIC). Provider HTTPS is host-brokered, so those hosts are not on the guest allowlist. Isolation is still **Planned**. The allowlist is ABox’s Go dialer, not a VMM guarantee.
+The guest has no NIC and no TSI inet (`krun_add_vsock` flags 0). Provider and MCP HTTPS stay on the host brokers. Isolation is still **Planned**. Origin policy is ABox’s Go dialer, not a VMM guarantee.
 
-LLM traffic does **not** take the MCP `connectivity.mode` path. Direct vs agentgateway today applies to MCP servers. The host broker hits the provider `base_url` above.
+LLM traffic does **not** take the MCP `connectivity.mode` path. Direct vs agentgateway today applies to MCP servers. The host LLM broker hits the provider `base_url` above. `connectivity.mode: offline` disables both.
 
 ## Credentials
 
@@ -306,11 +309,11 @@ credential:
 
 `/provider` and `/mcp` in the TUI save to the macOS keychain first, falling back to `credentials.env` (mode 0600) if the keychain is locked or missing. `/credential` writes a Vault / Azure Key Vault / AWS Secrets Manager reference into `config.yaml` (it does not store cloud tokens). When the cloud auth env vars are unset, Azure uses the local `az login` session and AWS uses `~/.aws/credentials` (and region from `~/.aws/config`). `abox creds migrate` moves existing `credentials.env` entries into the keychain.
 
-LLM keys stay on the host. MCP tokens still go to the guest because the guest makes those HTTPS calls.
+LLM keys and MCP tokens stay on the host. The guest never receives them.
 
 ## MCP Integration
 
-ABox is an MCP **client**. Remote tools are Streamable HTTP. Stdio MCP is not implemented.
+ABox is an MCP **client**. Remote tools are Streamable HTTP on the **host**. Stdio MCP is not implemented. The guest proxies `mcp_list` / `mcp_call` over vsock.
 
 ![](img/abox-mcp-agentgateway.gif)
 
@@ -342,13 +345,13 @@ abox mcp add --mode agentgateway agw https://agw.example/mcp
 
 `abox mcp login <name>` runs host OAuth (or saves a PAT) for a server that already exists in config. `/mcp` in the TUI pastes a Bearer for a configured server.
 
-One guest client. Every remote MCP is a Streamable HTTP `url`. Direct GitHub and an agentgateway virtual MCP are the same field; only `connectivity.mode` changes the policy. `credential_env` is optional (omit when the server needs no Bearer).
+One host MCP client. Every remote MCP is a Streamable HTTP `url`. Direct GitHub and an agentgateway virtual MCP are the same field; only `connectivity.mode` changes the policy. `credential_env` is optional (omit when the server needs no Bearer). The guest names a configured server and tool over vsock; it cannot supply a URL or header.
 
-- `direct` — guest may dial every `mcp_servers` URL.
+- `direct` — host may dial every `mcp_servers` URL.
 - `agentgateway` — those URLs are the gateway (typically one). Bind GitHub, Atlassian, and the rest **on the gateway**, not as extra ABox origins. ABox does not install the gateway; binary, Docker, or Kubernetes all work. `enforcement: required` means exactly one `mcp_servers` entry.
-- `offline` — no remote MCP.
+- `offline` — no remote MCP and no provider HTTPS.
 
-**Direct mode** — guest dials each configured HTTPS MCP server:
+**Direct mode** — host dials each configured HTTPS MCP server:
 
 ```yaml
 connectivity:
@@ -372,19 +375,23 @@ mcp_servers:
     url: https://agw.example/mcp
 ```
 
-There is no protocol difference. Same guest client, same Streamable HTTP, same url: field. https://api.githubcopilot.com/mcp/ and https://agw.example/mcp are the same kind of thing.
+There is no protocol difference. Same host client, same Streamable HTTP, same url: field. https://api.githubcopilot.com/mcp/ and https://agw.example/mcp are the same kind of thing.
 
 What differs is who is allowed to be an origin.
 
-1. direct: the guest may dial every URL you list. GitHub itself, an agentgateway, both, whatever. Auth is per entry (credential_env optional).
-2. agentgateway + required: config load fails if you list more than one URL. The guest’s allowlist is only that host. Copilot/Atlassian/etc. are bound on the gateway, not as extra ABox origins. That is the fail-closed PLAN rule: no silent fallback to api.githubcopilot.com.
+1. direct: the host may dial every URL you list. GitHub itself, an agentgateway, both, whatever. Auth is per entry (credential_env optional).
+2. agentgateway + required: config load fails if you list more than one URL. The host’s origin list is only that host. Copilot/Atlassian/etc. are bound on the gateway, not as extra ABox origins. That is the fail-closed PLAN rule: no silent fallback to api.githubcopilot.com.
 
 And this brings a huge difference which, with direct mode, you need to pass in a token/auth. With agentgateway mode, you handle OAuth/token Exchange/OBO via agentgateway policies, governance, and security implementations.
 
 ## Go SDK
 
-Docs: **[Go SDK on GitHub Pages](https://adminturneddevops.github.io/ABox/)**
+Docs: **[GitHub Pages](https://adminturneddevops.github.io/ABox/)**
 (overview, [quickstart](https://adminturneddevops.github.io/ABox/quickstart/),
+[CLI and TUI](https://adminturneddevops.github.io/ABox/cli/),
+[credentials](https://adminturneddevops.github.io/ABox/credentials/),
+[MCP](https://adminturneddevops.github.io/ABox/mcp/),
+[approvals](https://adminturneddevops.github.io/ABox/approvals/),
 [examples](https://adminturneddevops.github.io/ABox/examples/),
 [troubleshooting](https://adminturneddevops.github.io/ABox/troubleshooting/)).
 
@@ -398,8 +405,8 @@ _, err = sess.Turn(ctx, "List the repo files", func(ev abox.Event) {
 ```
 
 Import `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Apple Silicon, libkrun,
-golden image. Resume of a pre-rebuild disk is protocol v1 (`ErrGuestTooOld` for
-cancel / turn options).
+golden image. `Open` / `Resume` require protocol 4 (host LLM/MCP brokers and
+`run_command` approval). Resume of a pre-rebuild disk returns `ErrGuestTooOld`.
 
 ## Why?
 
@@ -439,21 +446,24 @@ Because of the above, Go or Rust are naturally great languages. Because I like G
 
 ## What is not done yet
 
-Compaction, checkpoint/rollback/fork, stdio MCP, host MCP/package broker, and resource
-acceptance. See `PLAN.md`. Streamable HTTP MCP is in; isolation stays Planned.
+Compaction, checkpoint/rollback/fork, stdio MCP, package broker, MCP tool approval,
+and resource acceptance. See `PLAN.md`. Streamable HTTP MCP is in (host-brokered);
+isolation stays Planned.
 
 ## Security
 
 Do not describe this build as verified isolation. The device plan is
-allowlisted (no guest NIC, no host-path virtio-fs). TSI inet is MCP HTTPS only.
-Claims stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
+allowlisted (no guest NIC, no TSI inet, no host-path virtio-fs). LLM and MCP
+HTTPS are host-brokered. Claims stay Planned until the hardware suite in
+`PLAN.md` §21.4 passes.
+
 ## Whats Currently In Place
 
 ```
 ┌──────────────────┬──────────────────────────────────────────────────────────────────────┐
 │ Area             │ State                                                                │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ Agent loop       │ In the guest. Host is TUI + VMM.                                     │
+│ Agent loop       │ In the guest. Host is TUI + VMM + LLM/MCP brokers                    │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ MicroVM boot     │ libkrun 1.19.4, raw disks, vsock, abox-vmm                           │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
@@ -463,13 +473,17 @@ Claims stay Planned until the hardware suite in `PLAN.md` §21.4 passes.
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ Providers        │ Grok/OpenAI (chat completions) + Anthropic Messages. /provider keys. │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ LLM egress       │ Host broker dials providers. Guest TSI inet is MCP-only              │
+│ LLM egress       │ Host broker dials providers. Guest has no NIC / no TSI               │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ MCP              │ Guest Streamable HTTP client; direct URLs or exclusive agentgateway  │
+│ MCP              │ Host Streamable HTTP broker; direct URLs or exclusive agentgateway   │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ TUI              │ Dark full-screen, Enter to send, /provider, /mcp                     │
+│ TUI              │ Instrument panel; /provider /credential /mcp /help; cmd approval     │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ Headless         │ abox exec, --probe-vm                                                │
+│ Credentials      │ env, keychain, vault, azure, aws. Keys stay on the host              │
+├──────────────────┼──────────────────────────────────────────────────────────────────────┤
+│ Approvals        │ run_command prompts (default deny). MCP tools do not                 │
+├──────────────────┼──────────────────────────────────────────────────────────────────────┤
+│ Headless         │ abox exec (run_command denied), --probe-vm                           │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ License / module │ Apache-2.0, github.com/AdminTurnedDevOps/ABox                        │
 ```
@@ -480,7 +494,7 @@ Harness
 • Context accounting and compaction
 • AGENTS.md / skills
 • Persistent sessions, resume, inspectable memory
-• Approval workflows (run_command and MCP should prompt; they do not)
+• MCP tool approval (run_command already prompts; default deny)
 • Patch review TUI and host import (export exists in guest; no review/import)
 
 Runtime
@@ -498,6 +512,6 @@ Providers (as specified)
 • Server-side provider tools explicitly disabled and tested
 
 Docs / Phase 0 leftovers
-• docs/architecture.md, threat model, ADRs, roadmap
+• threat model, ADRs, roadmap
 • Phase 0.5 spike recorded as Planned vs verified
-• PLAN still says “no TSI” in one table and “TSI inet for HTTPS” in another — needs a single decision
+• PLAN still says “no TSI” in one table and “TSI inet for HTTPS” in another — needs a single decision (code: vsock flags 0, no TSI)

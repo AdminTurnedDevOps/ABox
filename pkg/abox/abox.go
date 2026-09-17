@@ -18,7 +18,8 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
-// ErrGuestTooOld is returned when an operation requires a protocol-2+ guest.
+// ErrGuestTooOld is returned when the guest is older than protocol 4
+// (host LLM/MCP brokers and run_command approval).
 var ErrGuestTooOld = runtime.ErrGuestTooOld
 
 type Options struct {

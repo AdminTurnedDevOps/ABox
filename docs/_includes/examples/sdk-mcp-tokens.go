@@ -19,14 +19,14 @@ func main() {
 	env := os.Getenv("ABOX_MCP_TOKEN_ENV")
 	tok := os.Getenv("ABOX_MCP_TOKEN")
 	if env == "" || tok == "" {
-		fmt.Fprintln(os.Stderr, "set ABOX_MCP_TOKEN_ENV (guest env name) and ABOX_MCP_TOKEN")
+		fmt.Fprintln(os.Stderr, "set ABOX_MCP_TOKEN_ENV (host credential dest, e.g. GITHUB_MCP_TOKEN) and ABOX_MCP_TOKEN")
 		os.Exit(2)
 	}
 	if err := sess.SetMCPTokens(ctx, map[string]string{env: tok}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println("mcp token set for", env)
+	fmt.Println("mcp token set on host broker for", env)
 	_, err = sess.Turn(ctx, "List your MCP tools by name.", func(ev abox.Event) {
 		if ev.Kind == "text" {
 			fmt.Print(ev.Text)

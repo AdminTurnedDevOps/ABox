@@ -1,5 +1,5 @@
 title: ABox
-description: Isolated agent harness — Go SDK
+description: Isolated agent harness — Go SDK, CLI, and TUI
 url: https://adminturneddevops.github.io
 baseurl: /ABox
 remote_theme: just-the-docs/just-the-docs@v0.10.2

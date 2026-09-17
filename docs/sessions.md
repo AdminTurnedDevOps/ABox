@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Sessions
-nav_order: 5
+nav_order: 9
 permalink: /sessions/
 ---
 
@@ -11,13 +11,15 @@ permalink: /sessions/
 1. TOC
 {:toc}
 
-A session is a directory under `~/.abox/sessions/<id>/`:
+A session is a directory under `~/.abox/sessions/<id>/` (`ABOX_HOME` overrides
+the home):
 
 | File | Role |
 | --- | --- |
 | `root.raw` | Writable VM disk (`/dev/vda`) |
-| `config.raw` | Sealed config (`/dev/vdb`) |
-| `session.json` | Host metadata |
+| `config.raw` | Sealed config (`/dev/vdb`): session id + model alias. **No secrets** |
+| `guest-config.json` | Host-side copy of that config, also secretless |
+| `session.json` | Host metadata (id, repo root, HEAD, created) |
 | `transcript.json` | CLI TUI log (SDK does not write this) |
 | `console.log` | Guest serial |
 | `rpc.sock` | Host vsock proxy |
@@ -25,15 +27,23 @@ A session is a directory under `~/.abox/sessions/<id>/`:
 `Open` creates a new id. `Resume(id)` or `Resume("")` (latest for repo) boots
 that `root.raw` again. The host git tree is not copied on resume.
 
+On every start, ABox scrubs leftover plaintext secrets out of `config.raw`
+and `guest-config.json` (including leftover sessions under the old
+`~/Library/Application Support/ABox` path). It never deletes sessions.
+
 ## Lifetime
 
 ```text
-Open  → clone golden → boot → tar HEAD into /work/repo
-Turn  → user_turn / agent_event (repeat)
+Open  → clone golden → write secretless config → boot → tar HEAD into /work/repo
+Turn  → user_turn / agent_event (repeat); host brokers HTTPS
 Close → shutdown RPC, SIGINT abox-vmm
 ```
 
 Always `defer sess.Close()`. Leaking a session leaves a VM and a disk.
+
+Guest conversation state lives on the session disk at
+`/var/lib/abox/context.json`. Resume reloads it. The TUI also keeps
+`transcript.json` on the host.
 
 ## Resume vs new Open
 
@@ -42,6 +52,7 @@ Always `defer sess.Close()`. Leaking a session leaves a VM and a disk.
 | Disk | New clone of golden | Existing `root.raw` |
 | Guest binary | Whatever was in golden **at clone time** | Same as when that session was created |
 | Repo | Fresh tar of current HEAD | Guest files already on disk |
+| Config disk | Secretless, current model | Rewritten secretless; old keys stripped |
 
-To pick up a new `abox-guest` (protocol 2), `make image-update` then **Open**,
-not Resume of an old id.
+To pick up a new `abox-guest` (protocol 4), `make image-update` then **Open**,
+not Resume of an old id. Resume of a pre-v4 disk returns `ErrGuestTooOld`.

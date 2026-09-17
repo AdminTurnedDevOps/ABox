@@ -10,7 +10,7 @@ permalink: /examples/mcp-tokens/
 
 `Session.SetMCPTokens` on the one SDK, [`pkg/abox`]({{ '/api' | relative_url }}).
 
-Pushes a Bearer token into the guest and reconnects MCP. Configure servers with `abox mcp add` first. Host `credentials.env` is still how `Open` injects tokens at boot; this example is the live update path.
+Overrides a Bearer token on the **host** MCP broker. Configure servers with `abox mcp add` first. `Open` already resolves tokens from keychain / `credentials.env` / cloud sources; this example is the live override path. Keys are destination env names (`GITHUB_MCP_TOKEN`, or `ABOX_MCP_<NAME>_TOKEN`).
 
 ```bash
 export ABOX_MCP_TOKEN_ENV=ABOX_MCP_GH_TOKEN

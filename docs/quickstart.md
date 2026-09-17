@@ -32,16 +32,18 @@ make image          # first time only; Docker
 export PATH="$PWD/bin:$PATH"
 ```
 
-Put a provider key in the host (the SDK loads `~/.abox/credentials.env` the
-same way the CLI does):
+Put a provider key on the **host** (the guest never receives it). In the TUI:
 
 ```text
-# in the ABox TUI
 /provider
 ```
 
-or write `~/.abox/credentials.env` (mode `0600`) with `XAI_API_KEY=…` (or
-OpenAI / Anthropic).
+That saves to the macOS keychain first, then `~/.abox/credentials.env` (mode
+`0600`) if the keychain is locked. Cloud stores (Vault, Azure Key Vault, AWS
+Secrets Manager) use [`/credential`]({{ '/credentials' | relative_url }}).
+
+You can also write `~/.abox/credentials.env` yourself with `XAI_API_KEY=…`
+(or OpenAI / Anthropic).
 
 ## First program
 
@@ -96,12 +98,28 @@ export PATH="/path/to/abox-vmm-dir:$PATH"   # from the GitHub release archive
 go run .
 ```
 
-You should see `protocol 2` and a streamed sentence. `Close()` stops the VM.
+You should see `protocol 4` and a streamed sentence. `Close()` stops the VM.
+
+A successful `Open` always speaks protocol 4. Older session disks return
+`ErrGuestTooOld` — rebuild the guest (`make build && make image-update`) and
+`Open` a **new** session. Do not resume the old id.
 
 `abox-vmm` must be on `PATH`, or set `Options.VMMPath`. More methods:
 [Examples]({{ '/examples' | relative_url }}).
 
+## Terminal instead of Go
+
+```bash
+abox                  # TUI
+abox --probe-vm       # boot + list files; no model key
+abox exec --prompt "list the repository files"
+```
+
+[CLI and TUI]({{ '/cli' | relative_url }}) covers slash commands, resume, and
+MCP login.
+
 ## Next
 
-- [Examples]({{ '/examples' | relative_url }}) — resume, cancel, probe, patch export, …
-- [Troubleshooting]({{ '/troubleshooting' | relative_url }}) — missing image, v1 guest, codesign
+- [Concepts]({{ '/concepts' | relative_url }}) — host brokers, secretless config
+- [Examples]({{ '/examples' | relative_url }}) — resume, cancel, probe, approvals, …
+- [Troubleshooting]({{ '/troubleshooting' | relative_url }}) — missing image, old guest, codesign
