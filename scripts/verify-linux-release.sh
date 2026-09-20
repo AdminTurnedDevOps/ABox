@@ -75,7 +75,7 @@ expected_modes = {
     f"{root}/abox-vmm": 0o755,
     f"{root}/abox-guest-linux-amd64": 0o755,
     f"{root}/abox-guest-linux-amd64.raw.manifest.json": 0o444,
-    f"{root}/abox-guest-linux-amd64.raw.zst": 0o644,
+    f"{root}/abox-guest-linux-amd64.raw.zst": 0o444,
 }
 for member in members:
     name = member.name.rstrip("/")

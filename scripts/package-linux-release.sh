@@ -48,6 +48,7 @@ install -m 0755 "$ROOT/bin/abox-vmm" "$PAYLOAD/abox-vmm"
 install -m 0755 "$ROOT/bin/abox-guest-linux-amd64" "$PAYLOAD/abox-guest-linux-amd64"
 install -m 0444 "$MANIFEST" "$PAYLOAD/abox-guest-linux-amd64.raw.manifest.json"
 zstd -q -19 -T0 "$IMAGE" -o "$PAYLOAD/abox-guest-linux-amd64.raw.zst"
+chmod 0444 "$PAYLOAD/abox-guest-linux-amd64.raw.zst"
 cat > "$PAYLOAD/INSTALL" <<'EOF'
 Install abox and abox-vmm on PATH. Decompress abox-guest-linux-amd64.raw.zst
 to ~/.abox/images/abox-guest-linux-amd64.raw and place its adjacent manifest at
