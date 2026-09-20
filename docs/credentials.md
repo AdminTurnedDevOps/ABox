@@ -23,7 +23,7 @@ plaintext secrets out of old session files.
 | Source | `name` is | Auth |
 | --- | --- | --- |
 | `env` | environment variable (also reads `~/.abox/credentials.env`) | — |
-| `keychain` | macOS keychain account (service `abox`) | — |
+| `keystore` | macOS Keychain or Linux Secret Service account (service `abox`) | Linux: `secret-tool`, `gdbus`, session bus/provider |
 | `vault` | Vault KV v2 path (`secret/abox/anthropic`) | `VAULT_ADDR` + `VAULT_TOKEN` (or `~/.vault-token`) |
 | `azure` | Key Vault secret URI | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, or `az login` |
 | `aws` | Secrets Manager secret id | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`AWS_REGION`), or `~/.aws/credentials` |
@@ -34,8 +34,8 @@ models:
     provider: anthropic
     model: claude-sonnet-4-20250514
     credential:
-      source: keychain            # env | keychain | vault | azure | aws
-      name: ANTHROPIC_API_KEY     # env var, keychain account, vault path, Azure URI, or AWS id
+      source: keystore            # env | keystore | vault | azure | aws
+      name: ANTHROPIC_API_KEY     # env var, OS-keystore account, vault path, Azure URI, or AWS id
       # field: value              # vault/aws only
       # version: "4"              # vault/azure only
     base_url: https://api.anthropic.com
@@ -51,12 +51,28 @@ Each destination env name must be unique across models and MCP servers.
 `/provider` and `/mcp` in the TUI, and `abox mcp login`, call
 `SavePreferred`:
 
-1. macOS keychain, service `abox`, account = env name
-2. If the keychain is locked or missing: `~/.abox/credentials.env` (mode 0600)
+1. OS keystore, service `abox`, account = env name
+2. If unavailable, locked, or timed out: warned plaintext fallback at
+   `~/.abox/credentials.env` (mode 0600)
 
 ```bash
-abox creds migrate    # move existing credentials.env entries into the keychain
+abox creds migrate    # move existing credentials.env entries into the OS keystore
 ```
+
+On macOS, `keystore` uses Keychain through `security(1)`. On Linux, it uses
+Secret Service through `secret-tool` and a bounded `gdbus` availability/item
+probe. GNOME Keyring, KWallet (`org.kde.secretservicecompat`), and KeePassXC
+can provide that service. Values are sent to `secret-tool store` on stdin with
+no trailing newline and never placed in argv.
+
+If there is no session bus/provider, an item is locked, the provider disappears,
+or an unlock prompt exceeds the timeout, ABox warns and uses the 0600 file
+fallback. `keychain` and `secretservice` are accepted input aliases for existing
+config; saved config canonicalizes them to `keystore`.
+
+For headless Linux, prefer `vault`, `azure`, or `aws` when plaintext fallback is
+not acceptable. These cloud sources are cross-platform and do not depend on
+Secret Service.
 
 Refresh-token leftovers (`*_REFRESH`) are dropped during migrate. Re-login
 when an MCP access token expires; ABox does not persist refresh tokens.

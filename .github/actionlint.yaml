@@ -1,0 +1,11 @@
+self-hosted-runner:
+  labels:
+    - abox-kvm-arch
+    - abox-kvm-fedora
+
+config-variables:
+  - ABOX_KVM_ACCEPTANCE_SHA256
+  - ABOX_KVM_ARCH_HARNESS_SHA256
+  - ABOX_KVM_ARCH_RUNNER_NAME
+  - ABOX_KVM_FEDORA_HARNESS_SHA256
+  - ABOX_KVM_FEDORA_RUNNER_NAME

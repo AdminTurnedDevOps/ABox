@@ -395,7 +395,7 @@ func TestCallSkipsLateCancelResponse(t *testing.T) {
 func TestWaitHelloStoresProtocol(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, Sess: &session.Session{ID: "sid", Capability: "cap"}}
+	s := &Sandbox{conn: host, Sess: &session.Session{ID: "sid", Capability: "cap", Dir: t.TempDir(), DiagnosticProbe: true}}
 	go func() {
 		params, _ := protocol.EncodeParams(protocol.HelloParams{
 			SessionID: "sid", Capability: "cap", Protocol: 2, GuestReady: true,
@@ -415,7 +415,7 @@ func TestWaitHelloStoresProtocol(t *testing.T) {
 func TestWaitHelloDefaultsV1(t *testing.T) {
 	host, guest := net.Pipe()
 	t.Cleanup(func() { host.Close(); guest.Close() })
-	s := &Sandbox{conn: host, Sess: &session.Session{ID: "sid", Capability: "cap"}}
+	s := &Sandbox{conn: host, Sess: &session.Session{ID: "sid", Capability: "cap", Dir: t.TempDir(), DiagnosticProbe: true}}
 	go func() {
 		params, _ := protocol.EncodeParams(protocol.HelloParams{
 			SessionID: "sid", Capability: "cap", GuestReady: true,
@@ -429,5 +429,45 @@ func TestWaitHelloDefaultsV1(t *testing.T) {
 	}
 	if s.GuestProtocol != 1 {
 		t.Fatalf("protocol %d", s.GuestProtocol)
+	}
+}
+
+func TestWaitHelloRejectsFutureProtocol(t *testing.T) {
+	host, guest := net.Pipe()
+	t.Cleanup(func() { host.Close(); guest.Close() })
+	s := &Sandbox{conn: host, Sess: &session.Session{ID: "sid", Capability: "cap", Dir: t.TempDir()}}
+	response := make(chan protocol.HelloResult, 1)
+	go func() {
+		params, _ := protocol.EncodeParams(protocol.HelloParams{
+			SessionID: "sid", Capability: "cap", Protocol: protocol.Version + 1, GuestReady: true,
+		})
+		_ = protocol.WriteFrame(guest, protocol.Frame{ID: "hello", Method: "hello", Params: params})
+		frame, _ := protocol.ReadFrame(guest)
+		result, _ := protocol.DecodeParams[protocol.HelloResult](frame.Result)
+		response <- result
+	}()
+	if err := s.waitHello(context.Background()); err == nil || !strings.Contains(err.Error(), "newer") {
+		t.Fatalf("got %v", err)
+	}
+	if result := <-response; result.Accepted || result.Protocol != protocol.Version {
+		t.Fatalf("response = %#v", result)
+	}
+}
+
+func TestWaitHelloRejectsRecordedImageMismatch(t *testing.T) {
+	host, guest := net.Pipe()
+	t.Cleanup(func() { host.Close(); guest.Close() })
+	s := &Sandbox{conn: host, Sess: &session.Session{
+		ID: "sid", Capability: "cap", Dir: t.TempDir(), GuestProtocol: protocol.Version, ImageID: "expected",
+	}}
+	go func() {
+		params, _ := protocol.EncodeParams(protocol.HelloParams{
+			SessionID: "sid", Capability: "cap", Protocol: protocol.Version, ImageID: "other", GuestReady: true,
+		})
+		_ = protocol.WriteFrame(guest, protocol.Frame{ID: "hello", Method: "hello", Params: params})
+		_, _ = protocol.ReadFrame(guest)
+	}()
+	if err := s.waitHello(context.Background()); err == nil || !strings.Contains(err.Error(), "image id") {
+		t.Fatalf("got %v", err)
 	}
 }

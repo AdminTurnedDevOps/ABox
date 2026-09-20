@@ -1,7 +1,9 @@
 package credsource
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
 )
@@ -96,136 +99,267 @@ func TestEnvSourceNotFound(t *testing.T) {
 	}
 }
 
-func TestKeychainResolveReadsPasswordOnly(t *testing.T) {
-	var argv []string
-	orig := runSecurity
-	runSecurity = func(_ context.Context, args []string, stdin string) (string, string, error) {
-		argv = args
-		return "kchain-value\n", "", nil
-	}
-	t.Cleanup(func() { runSecurity = orig })
+type staticSource struct{ value []byte }
 
-	v, err := testResolver().Resolve(context.Background(), Reference{Source: "keychain", Name: "ANTHROPIC_API_KEY"})
+func (s staticSource) Resolve(context.Context, Reference) (Value, error) {
+	return Value{Bytes: append([]byte(nil), s.value...)}, nil
+}
+func (staticSource) Close() error { return nil }
+
+func TestResolverAcceptsKeystoreAliases(t *testing.T) {
+	r := &Resolver{sources: map[string]Source{}}
+	r.Register("keystore", staticSource{value: []byte("value")})
+	for _, source := range []string{"keystore", "keychain", "secretservice"} {
+		v, err := r.Resolve(context.Background(), Reference{Source: source, Name: "SAFE_NAME"})
+		if err != nil || string(v.Bytes) != "value" {
+			t.Fatalf("%s: value=%q err=%v", source, v.Bytes, err)
+		}
+	}
+}
+
+func TestOSKeystoreDispatch(t *testing.T) {
+	if _, ok := selectedOSKeystore("darwin").(keychainStore); !ok {
+		t.Fatal("darwin did not select the macOS keychain")
+	}
+	if _, ok := selectedOSKeystore("linux").(secretServiceStore); !ok {
+		t.Fatal("linux did not select Secret Service")
+	}
+	if _, ok := selectedOSKeystore("windows").(unavailableStore); !ok {
+		t.Fatal("unsupported platform did not select unavailable store")
+	}
+}
+
+func installKeystoreFakes(t *testing.T, run func(context.Context, string, []string, []byte) ([]byte, []byte, error)) {
+	t.Helper()
+	origLookPath := keystoreLookPath
+	origRun := runKeystoreCommand
+	keystoreLookPath = func(name string) (string, error) { return "/fake/" + name, nil }
+	runKeystoreCommand = run
+	t.Cleanup(func() {
+		keystoreLookPath = origLookPath
+		runKeystoreCommand = origRun
+	})
+}
+
+func successfulSecretServiceCommand(_ context.Context, path string, args []string, _ []byte) ([]byte, []byte, error) {
+	joined := strings.Join(args, " ")
+	switch {
+	case strings.Contains(joined, "StartServiceByName"):
+		return []byte("(uint32 2,)"), nil, nil
+	case strings.Contains(joined, "NameHasOwner"):
+		return []byte("(true,)"), nil, nil
+	case strings.Contains(joined, "SearchItems"):
+		return []byte("([objectpath '/org/freedesktop/secrets/collection/login/1'], @ao [])"), nil, nil
+	case path == "/fake/secret-tool":
+		return nil, nil, nil
+	default:
+		return nil, nil, fmt.Errorf("unexpected command %s %v", path, args)
+	}
+}
+
+func TestSecretServiceGetIsByteExact(t *testing.T) {
+	want := []byte(" value with spaces\nand newline\n")
+	installKeystoreFakes(t, func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, []byte, error) {
+		if path == "/fake/secret-tool" {
+			if got := strings.Join(args, " "); got != "lookup service abox account SAFE_NAME" {
+				t.Fatalf("lookup args %q", got)
+			}
+			return append([]byte(nil), want...), nil, nil
+		}
+		return successfulSecretServiceCommand(ctx, path, args, stdin)
+	})
+	got, err := (secretServiceStore{}).Get(context.Background(), "SAFE_NAME")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(v.Bytes) != "kchain-value" {
-		t.Fatalf("got %q", v.Bytes)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %q want %q", got, want)
 	}
-	want := []string{"find-generic-password", "-s", "abox", "-a", "ANTHROPIC_API_KEY", "-w"}
-	if len(argv) != len(want) {
-		t.Fatalf("argv=%v", argv)
-	}
-	for i := range want {
-		if argv[i] != want[i] {
-			t.Fatalf("argv=%v", argv)
+}
+
+func TestSecretServiceSetUsesOnlyByteExactStdin(t *testing.T) {
+	secret := []byte("plain-key\n")
+	installKeystoreFakes(t, func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, []byte, error) {
+		if path == "/fake/secret-tool" {
+			for _, arg := range args {
+				if strings.Contains(arg, "plain-key") {
+					t.Fatalf("secret leaked in argv: %v", args)
+				}
+			}
+			if got := strings.Join(args, " "); got != "store --label abox: SAFE_NAME service abox account SAFE_NAME" {
+				t.Fatalf("store args %q", got)
+			}
+			if !bytes.Equal(stdin, secret) {
+				t.Fatalf("stdin %q want %q", stdin, secret)
+			}
+			return nil, nil, nil
 		}
-	}
-	for _, a := range argv {
-		if strings.Contains(a, "kchain-value") {
-			t.Fatalf("secret value leaked into argv: %v", argv)
-		}
-	}
-}
-
-func TestKeychainResolveNotFoundExit44(t *testing.T) {
-	orig := runSecurity
-	runSecurity = func(_ context.Context, args []string, _ string) (string, string, error) {
-		return "", "could not be found", fakeExitError(44)
-	}
-	t.Cleanup(func() { runSecurity = orig })
-
-	_, err := testResolver().Resolve(context.Background(), Reference{Source: "keychain", Name: "NOPE"})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestKeychainResolveLocked(t *testing.T) {
-	orig := runSecurity
-	runSecurity = func(_ context.Context, _ []string, _ string) (string, string, error) {
-		return "", "security: SecKeychainSearchCopyNext(): User interaction is not allowed.", fakeExitError(1)
-	}
-	t.Cleanup(func() { runSecurity = orig })
-
-	_, err := testResolver().Resolve(context.Background(), Reference{Source: "keychain", Name: "X"})
-	if !errors.Is(err, ErrLocked) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestKeychainSetUsesStdinHexNoArgvLeak(t *testing.T) {
-	var argv, stdin, stderr []string
-	orig := runSecurity
-	runSecurity = func(_ context.Context, args []string, in string) (string, string, error) {
-		argv = args
-		stdin = append(stdin, in)
-		return "", "", nil
-	}
-	t.Cleanup(func() { runSecurity = orig })
-
-	if err := SetKeychain(context.Background(), "ANTHROPIC_API_KEY", []byte("plain-key")); err != nil {
+		return successfulSecretServiceCommand(ctx, path, args, stdin)
+	})
+	if err := (secretServiceStore{}).Set(context.Background(), "SAFE_NAME", secret); err != nil {
 		t.Fatal(err)
 	}
-	if len(argv) != 1 || argv[0] != "-i" {
-		t.Fatalf("argv=%v, want only [\"-i\"]", argv)
-	}
-	if len(stdin) != 1 {
-		t.Fatalf("stdin writes: %d", len(stdin))
-	}
-	cmd := stdin[0]
-	if strings.Contains(cmd, "plain-key") {
-		t.Fatal("plaintext secret in security stdin command")
-	}
-	if !strings.Contains(cmd, "add-generic-password -U -s abox -a ANTHROPIC_API_KEY -X") {
-		t.Fatalf("stdin command: %q", cmd)
-	}
-	_ = stderr
 }
 
-func TestKeychainRejectsCommandInputAccountName(t *testing.T) {
+func TestSecretServiceMissingItemIsNotFound(t *testing.T) {
+	installKeystoreFakes(t, func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, []byte, error) {
+		if strings.Contains(strings.Join(args, " "), "SearchItems") {
+			return []byte("(@ao [], @ao [])"), nil, nil
+		}
+		if path == "/fake/secret-tool" {
+			t.Fatal("secret-tool called for confirmed missing item")
+		}
+		return successfulSecretServiceCommand(ctx, path, args, stdin)
+	})
+	_, err := (secretServiceStore{}).Get(context.Background(), "MISSING")
+	if !errors.Is(err, ErrNotFound) || errors.Is(err, ErrLocked) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSecretServiceLockedItemIsLocked(t *testing.T) {
+	installKeystoreFakes(t, func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, []byte, error) {
+		if path == "/fake/secret-tool" {
+			return nil, []byte("prompt dismissed"), fakeExitError(1)
+		}
+		return successfulSecretServiceCommand(ctx, path, args, stdin)
+	})
+	_, err := (secretServiceStore{}).Get(context.Background(), "SAFE_NAME")
+	if !errors.Is(err, ErrLocked) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSecretServiceUnavailableWithoutProvider(t *testing.T) {
+	installKeystoreFakes(t, func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		if strings.Contains(strings.Join(args, " "), "NameHasOwner") {
+			return []byte("(false,)"), nil, nil
+		}
+		return nil, []byte("not activatable"), fakeExitError(1)
+	})
+	if err := secretServiceAvailable(context.Background()); !errors.Is(err, ErrLocked) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSecretServiceMissingSessionBusIsLocked(t *testing.T) {
+	installKeystoreFakes(t, func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		if strings.Contains(strings.Join(args, " "), "NameHasOwner") {
+			return nil, []byte("Cannot autolaunch D-Bus without X11 $DISPLAY"), fakeExitError(1)
+		}
+		return nil, []byte("session bus unavailable"), fakeExitError(1)
+	})
+	if err := secretServiceAvailable(context.Background()); !errors.Is(err, ErrLocked) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSecretServiceMissingGDBusIsUnavailable(t *testing.T) {
+	origLookPath := keystoreLookPath
+	keystoreLookPath = func(name string) (string, error) {
+		if name == "gdbus" {
+			return "", os.ErrNotExist
+		}
+		return "/fake/" + name, nil
+	}
+	t.Cleanup(func() { keystoreLookPath = origLookPath })
+	if err := secretServiceAvailable(context.Background()); !errors.Is(err, ErrLocked) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSecretServiceTimeoutIsLockedAndRunnerReturns(t *testing.T) {
+	reaped := make(chan struct{})
+	installKeystoreFakes(t, func(ctx context.Context, _ string, _ []string, _ []byte) ([]byte, []byte, error) {
+		<-ctx.Done()
+		close(reaped)
+		return nil, nil, ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := (secretServiceStore{}).Get(ctx, "SAFE_NAME")
+	if !errors.Is(err, ErrLocked) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v", err)
+	}
+	select {
+	case <-reaped:
+	default:
+		t.Fatal("command runner did not return on timeout")
+	}
+}
+
+func TestSecretServiceProviderLossDuringSaveIsLocked(t *testing.T) {
+	installKeystoreFakes(t, func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, []byte, error) {
+		if path == "/fake/secret-tool" {
+			return nil, []byte("service vanished"), fakeExitError(1)
+		}
+		return successfulSecretServiceCommand(ctx, path, args, stdin)
+	})
+	if err := (secretServiceStore{}).Set(context.Background(), "SAFE_NAME", []byte("value")); !errors.Is(err, ErrLocked) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestMacOSKeychainBehaviorRetained(t *testing.T) {
+	var setInput []byte
+	installKeystoreFakes(t, func(_ context.Context, path string, args []string, stdin []byte) ([]byte, []byte, error) {
+		if path != "/usr/bin/security" {
+			t.Fatalf("path %q", path)
+		}
+		if len(args) == 1 && args[0] == "-i" {
+			setInput = append([]byte(nil), stdin...)
+			return nil, nil, nil
+		}
+		return []byte("keychain-value\n"), nil, nil
+	})
+	value, err := (keychainStore{}).Get(context.Background(), "SAFE_NAME")
+	if err != nil || string(value) != "keychain-value" {
+		t.Fatalf("value=%q err=%v", value, err)
+	}
+	if err := (keychainStore{}).Set(context.Background(), "SAFE_NAME", []byte("plain-key")); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(setInput, []byte("plain-key")) || !bytes.Contains(setInput, []byte(hex.EncodeToString([]byte("plain-key")))) {
+		t.Fatalf("security input %q", setInput)
+	}
+}
+
+func TestMacOSKeychainErrorMappingsRetained(t *testing.T) {
+	installKeystoreFakes(t, func(_ context.Context, _ string, args []string, _ []byte) ([]byte, []byte, error) {
+		if len(args) > 0 && args[0] == "find-generic-password" {
+			if slicesContain(args, "MISSING") {
+				return nil, []byte("could not be found"), fakeExitError(44)
+			}
+			return nil, []byte("User interaction is not allowed"), fakeExitError(1)
+		}
+		return nil, nil, nil
+	})
+	if _, err := (keychainStore{}).Get(context.Background(), "MISSING"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	if _, err := (keychainStore{}).Get(context.Background(), "LOCKED"); !errors.Is(err, ErrLocked) {
+		t.Fatalf("locked: %v", err)
+	}
+}
+
+func slicesContain(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestKeystoreRejectsUnsafeAccountBeforeCommand(t *testing.T) {
 	called := false
-	orig := runSecurity
-	runSecurity = func(_ context.Context, _ []string, _ string) (string, string, error) {
+	installKeystoreFakes(t, func(context.Context, string, []string, []byte) ([]byte, []byte, error) {
 		called = true
-		return "", "", nil
-	}
-	t.Cleanup(func() { runSecurity = orig })
-
-	err := SetKeychain(context.Background(), "SAFE_NAME\n delete-generic-password", []byte("value"))
-	if err == nil || !strings.Contains(err.Error(), "invalid keychain account name") {
-		t.Fatalf("got %v", err)
-	}
-	if called {
-		t.Fatal("security invoked for invalid account name")
-	}
-}
-
-func TestKeychainCommandErrorWrapsCause(t *testing.T) {
-	cause := errors.New("security failed")
-	orig := runSecurity
-	runSecurity = func(_ context.Context, _ []string, _ string) (string, string, error) {
-		return "", "diagnostic", cause
-	}
-	t.Cleanup(func() { runSecurity = orig })
-
-	err := SetKeychain(context.Background(), "SAFE_NAME", []byte("value"))
-	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "diagnostic") {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestKeychainMissingToolIsUnavailableAndWrapsCause(t *testing.T) {
-	cause := &os.PathError{Op: "fork/exec", Path: "/usr/bin/security", Err: os.ErrNotExist}
-	orig := runSecurity
-	runSecurity = func(_ context.Context, _ []string, _ string) (string, string, error) {
-		return "", "", cause
-	}
-	t.Cleanup(func() { runSecurity = orig })
-
-	_, err := testResolver().Resolve(context.Background(), Reference{Source: "keychain", Name: "SAFE_NAME"})
-	if !errors.Is(err, ErrLocked) || !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("got %v", err)
+		return nil, nil, nil
+	})
+	err := SetOSKeystore(context.Background(), "SAFE_NAME\naccount", []byte("value"))
+	if err == nil || !strings.Contains(err.Error(), "invalid keystore account name") || called {
+		t.Fatalf("err=%v called=%v", err, called)
 	}
 }
 
@@ -238,49 +372,76 @@ func TestSecurityToolAvailable(t *testing.T) {
 	}
 }
 
-func TestSavePreferredReportsKeychainSource(t *testing.T) {
+func TestSavePreferredWarnsOnUnavailableFallback(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	origEnabled := KeychainEnabled
-	origSecurity := runSecurity
-	KeychainEnabled = func() bool { return true }
-	runSecurity = func(_ context.Context, args []string, _ string) (string, string, error) {
-		if len(args) != 1 || args[0] != "-i" {
-			t.Fatalf("args %v", args)
-		}
-		return "", "", nil
-	}
-	t.Cleanup(func() {
-		KeychainEnabled = origEnabled
-		runSecurity = origSecurity
-	})
-
+	origEnabled := KeystoreEnabled
+	KeystoreEnabled = func(context.Context) bool { return false }
+	t.Cleanup(func() { KeystoreEnabled = origEnabled })
 	result, err := SavePreferred(context.Background(), "SAFE_NAME", "value")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Source != "keychain" || !result.Keychain {
+	if result.Source != "env" || result.Keystore || !strings.Contains(result.Note, "warning:") || !strings.Contains(result.Note, "0600") {
+		t.Fatalf("result %#v", result)
+	}
+	info, err := os.Stat(credentials.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("credentials mode=%v", info.Mode())
+	}
+}
+
+type lockedStore struct{}
+
+func (lockedStore) Available(context.Context) bool { return true }
+func (lockedStore) Get(context.Context, string) ([]byte, error) {
+	return nil, ErrLocked
+}
+func (lockedStore) Set(context.Context, string, []byte) error { return ErrLocked }
+func (lockedStore) Delete(context.Context, string) error      { return ErrLocked }
+func (lockedStore) Description() string                       { return "locked test store" }
+
+func TestSavePreferredWarnsOnLockedFallback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	origEnabled := KeystoreEnabled
+	origStore := currentOSKeystore
+	KeystoreEnabled = func(context.Context) bool { return true }
+	currentOSKeystore = func() osKeystore { return lockedStore{} }
+	t.Cleanup(func() {
+		KeystoreEnabled = origEnabled
+		currentOSKeystore = origStore
+	})
+	result, err := SavePreferred(context.Background(), "SAFE_NAME", "value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Source != "env" || !strings.Contains(result.Note, "locked or unavailable") {
 		t.Fatalf("result %#v", result)
 	}
 }
 
-func TestSavePreferredRemovesLeftoverFileEntry(t *testing.T) {
+func TestSavePreferredReportsCanonicalKeystoreAndRemovesFallback(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if err := credentials.Save("SAFE_NAME", "old-file-value"); err != nil {
+	if err := credentials.Save("SAFE_NAME", "old-value"); err != nil {
 		t.Fatal(err)
 	}
-	origEnabled := KeychainEnabled
-	origSecurity := runSecurity
-	KeychainEnabled = func() bool { return true }
-	runSecurity = func(_ context.Context, args []string, _ string) (string, string, error) {
-		return "", "", nil
-	}
+	origEnabled := KeystoreEnabled
+	origStore := currentOSKeystore
+	KeystoreEnabled = func(context.Context) bool { return true }
+	currentOSKeystore = func() osKeystore { return secretServiceStore{} }
 	t.Cleanup(func() {
-		KeychainEnabled = origEnabled
-		runSecurity = origSecurity
+		KeystoreEnabled = origEnabled
+		currentOSKeystore = origStore
 	})
-
-	if _, err := SavePreferred(context.Background(), "SAFE_NAME", "new-keychain-value"); err != nil {
+	installKeystoreFakes(t, successfulSecretServiceCommand)
+	result, err := SavePreferred(context.Background(), "SAFE_NAME", "new-value")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if result.Source != "keystore" || !result.Keystore {
+		t.Fatalf("result %#v", result)
 	}
 	got, err := credentials.Load()
 	if err != nil {
@@ -288,29 +449,6 @@ func TestSavePreferredRemovesLeftoverFileEntry(t *testing.T) {
 	}
 	if _, ok := got["SAFE_NAME"]; ok {
 		t.Fatalf("leftover file entry %#v", got)
-	}
-}
-
-func TestKeychainDelete(t *testing.T) {
-	var argv []string
-	orig := runSecurity
-	runSecurity = func(_ context.Context, args []string, _ string) (string, string, error) {
-		argv = args
-		return "", "", nil
-	}
-	t.Cleanup(func() { runSecurity = orig })
-
-	if err := DeleteKeychain(context.Background(), "ANTHROPIC_API_KEY"); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"delete-generic-password", "-s", "abox", "-a", "ANTHROPIC_API_KEY"}
-	if len(argv) != len(want) {
-		t.Fatalf("argv=%v", argv)
-	}
-	for i := range want {
-		if argv[i] != want[i] {
-			t.Fatalf("argv=%v", argv)
-		}
 	}
 }
 

@@ -52,15 +52,15 @@ The current plan makes these decisions:
 | Implementation language | Go 1.25 |
 | Go module | `github.com/AdminTurnedDevOps/ABox` |
 | License | Apache-2.0 |
-| Initial host | macOS on Apple Silicon |
-| Initial guest | ARM64 Linux |
-| Initial microVM backend | libkrun over Apple Hypervisor.framework |
+| Host runtimes | macOS/arm64 over Hypervisor.framework is runnable; Linux amd64/arm64 over KVM is implemented but runtime/release support remains Planned pending separate Phase 0.5/18 evidence |
+| Guest architectures | Linux arm64 and amd64 images/builds; runtime support follows the matching host hardware gate |
+| MicroVM backend | libkrun over Apple Hypervisor.framework (`hvf`) or Linux KVM (`kvm`) |
 | Runtime integration | Dedicated `abox-vmm` Go helper with a narrow cgo boundary |
 | Guest network | No guest NIC and no TSI inet or Unix hijacking; RPC uses vsock only. Hardware isolation remains unverified |
 | Model traffic | Protocol-4 host LLM broker; the guest supplies a configured model alias and bounded request data |
 | Remote MCP traffic | Protocol-4 host Streamable HTTP broker; the guest supplies configured server/tool identities and arguments, never endpoints or credentials |
 | Providers | OpenAI and xAI through Chat Completions today; Anthropic through Messages. OpenAI/xAI Responses remain Planned |
-| Source state | Any host directory is snapshotted exactly; host Git state is not inspected and `.git` metadata is excluded |
+| Source state | Git worktree root is discovered; clean `HEAD` or a private dirty-tree snapshot is transferred without `.git` metadata |
 | Host workspace sharing | Prohibited |
 | Repository transfer | Private snapshot copied into a writable guest disk |
 | Change return | Guest patch export is implemented. Reviewed host import remains Planned |
@@ -81,6 +81,8 @@ The current plan makes these decisions:
 | Default VM resources | 1 vCPU and 768 MiB RAM; upper resource limits and acceptance measurements remain Planned |
 | VM concurrency | No global limit is enforced today; the target is one running VM by default. Checkpoint and fork orchestration are not implemented |
 | Background services | No resident ABox daemon |
+| Linux build baselines | Arch 2026-09-17 x86_64 snapshot: libkrun 1.19.4-1/libkrunfw 5.5.0-1; Fedora 44 x86_64: libkrun/libkrun-devel 1.19.0-1.fc44/libkrunfw 5.5.0-1.fc44 |
+| Unsupported VMM environments | WSL2 and containerized execution; containers remain valid compile/image-build environments |
 
 ## 2.1 Resource Efficiency
 
@@ -108,8 +110,10 @@ Docker, a container engine, Kubernetes, or another agent harness.
   private disk and resumable session state.
 - Terminate the helper and release VM resources immediately when the session
   is destroyed or ABox exits.
-- Use one verified immutable base image and APFS copy-on-write clones for
-  session disks. Fall back to a full copy only when clone support is absent.
+- Use one verified immutable base image and copy-on-write clones where the host
+  filesystem supports them: APFS `clonefile` on macOS, FICLONE on Linux btrfs,
+  XFS with reflink, or bcachefs. Linux then tries `copy_file_range`; all hosts
+  fall back to a full private copy. Never replace a copy with a host mount.
 - Stream provider, RPC, command, search, and patch data rather than buffering
   unbounded results in memory.
 - Keep bounded TUI scrollback and spill retained session events to compact
@@ -120,8 +124,8 @@ Docker, a container engine, Kubernetes, or another agent harness.
 
 ### Initial Resource Budgets
 
-These are milestone targets to validate on a named baseline Apple Silicon
-machine. Measurements must be recorded and the budgets may be changed only
+These are milestone targets to validate separately on named platform baseline
+machines. Measurements must be recorded per backend and may be changed only
 with benchmark evidence and an ADR update.
 
 | Resource | Initial target |
@@ -191,8 +195,10 @@ The host-side `abox` process owns:
 - Patch review and confirmed import
 
 Provider credentials and MCP tokens are entered or referenced on the host and
-resolved from env-backed storage, macOS keychain, Vault, Azure Key Vault, or
-AWS Secrets Manager. Resolved values are never written to session metadata,
+resolved from env-backed storage, the platform OS keystore (macOS Keychain or
+Linux Secret Service), Vault, Azure Key Vault, or AWS Secrets Manager.
+`keystore` is the canonical config name; `keychain` and `secretservice` are
+accepted aliases. Resolved values are never written to session metadata,
 `guest-config.json`, `config.raw`, or the guest disk. Host brokers perform
 provider and remote MCP HTTPS; the agent loop remains in the guest.
 
@@ -259,14 +265,16 @@ The UI and documentation must communicate that behavior clearly.
 
 ## 5. Why libkrun
 
-libkrun provides hardware-backed isolation. On Apple Silicon, the stack is:
+libkrun provides a userspace VMM over a host hardware virtualization API. The
+implemented host stacks are:
 
 ```text
 ABox supervisor (Go)
   -> abox-vmm helper (Go + cgo)
   -> libkrun userspace VMM
-  -> Apple Hypervisor.framework
-  -> ARM hardware virtualization
+  -> Apple Hypervisor.framework (macOS/arm64)
+     or KVM (Linux/amd64 or Linux/arm64)
+  -> host hardware virtualization
   -> isolated Linux guest kernel and memory
 ```
 
@@ -278,8 +286,8 @@ libkrun is preferred for the initial backend because:
 
 - It is explicitly designed for lightweight microVM-style workloads.
 - It uses Hypervisor.framework on macOS ARM64.
-- It supports KVM on Linux, providing a credible future backend path without
-  coupling the higher-level harness to macOS.
+- It uses KVM on Linux through the same narrow helper binding. Linux runtime
+  and isolation support stay Planned until the independent KVM hardware gate.
 - It supports raw block devices and virtio-vsock.
 - It can add an explicit vsock device with TSI feature flags set to zero.
 - It has a stable C API suitable for a narrow Go cgo wrapper.
@@ -344,10 +352,10 @@ The current device-plan calls and remaining profile requirements are:
   `KRUN_SYNC_RELAXED`. Never pass qcow2 or vmdk. Never probe format.
 - Call `krun_has_feature(KRUN_FEATURE_BLK)` and refuse to start if block
   devices are unavailable.
-- Use `krun_get_shutdown_eventfd` for orderly `Sandbox.Stop` when the
-  pinned flavor provides it. On `stable-1.19.x` that call is documented as
-  libkrun-efi only. If the pin lacks it, document forced stop as the
-  remaining path.
+- Current orderly stop sends the guest shutdown RPC, then uses the
+  platform-specific helper fallback: interrupt on macOS or SIGTERM on Linux,
+  followed by bounded SIGKILL and `Wait`. Generic Linux libkrun does not expose
+  the EFI-only `krun_get_shutdown_eventfd` path used by some flavors.
 - Reject unknown runtime options and arbitrary extra device arguments.
 - Bind the RPC Unix socket inside a mode `0700` session directory.
 - Current code configures vCPU/RAM and bounds command duration/output;
@@ -356,24 +364,28 @@ The current device-plan calls and remaining profile requirements are:
 
 Guest process configuration is no longer undecided in the product code:
 `abox-vmm` calls `krun_set_exec` with `/usr/local/bin/abox-guest` and a fixed
-environment on the documented libkrun 1.19.4 path. The composed product boot
-path is implemented and runnable. Its no-NIC, no-TSI, and no-host-path-
-filesystem isolation properties remain implemented but unverified until the
-named Apple Silicon hardware suite passes. Documentation must distinguish
-"boots successfully" from "hardware isolation verified." The effective
-device configuration is an allowlist.
+environment on the documented libkrun 1.19.x path. The composed product boot
+path is implemented, and the macOS/arm64 path is runnable. Its no-NIC, no-TSI,
+and no-host-path-filesystem properties remain implemented but unverified until
+the named platform hardware suites pass. Linux/KVM needs separate evidence on
+both pinned Arch and Fedora baselines. Documentation must distinguish "boots
+successfully" from "hardware isolation verified." The effective device
+configuration is an allowlist.
 
 ### 5.3 Initial Backend Limitations
 
 - Hardware virtualization does not protect against a compromised trusted host.
-- It does not provide confidential memory or remote attestation on Apple
-  Silicon.
-- A VMM or Hypervisor.framework escape remains in scope as a residual risk.
+- It does not provide confidential memory or remote attestation on the current
+  macOS or Linux targets.
+- A VMM, Hypervisor.framework, KVM, or device-emulation escape remains in scope
+  as a residual risk.
 - Packaging requires pinned libkrun and libkrunfw artifacts.
 - The cgo helper is platform-specific even though the higher-level runtime
   interface is not.
 - macOS runtime upgrades can change the effective hypervisor behavior and must
   be tested.
+- Linux kernel, KVM, libkrun, libkrunfw, and SELinux changes can change the
+  effective behavior and must be tested independently per pinned baseline.
 
 ## 6. Runtime Abstraction
 
@@ -490,7 +502,7 @@ ABox uses one Go module with three binaries and a public SDK:
   and fallback storage
 - `internal/repository`, `internal/runtime`, `internal/session`,
   `internal/config`, `internal/tui`, and `internal/vmmconfig`
-- `images`: current Docker-based guest-image builder
+- `images`: Docker guest-image builder on macOS and rootless native builder on Linux
 - `docs` and `examples`: SDK and CLI documentation and examples
 
 Dedicated audit, patch-import, checkpoint-lineage, memory, skills,
@@ -506,14 +518,15 @@ The current default root is `~/.abox`; `ABOX_HOME` overrides it:
 ~/.abox/config.yaml
 ~/.abox/credentials.env
 ~/.abox/sessions/<session-id>/
-~/.abox/images/abox-guest.raw
+~/.abox/images/abox-guest-linux-<arch>.raw
 ```
 
 The former `~/Library/Application Support/ABox` and
 `~/Library/Caches/ABox/images` locations are legacy migration or fallback
 paths, not the primary layout. The configuration file stores credential
-references, never credential values. A signed or checksummed image manifest
-and digest verification remain Planned.
+references, never credential values. Each resolved image has an adjacent
+schema-1 manifest with architecture, image ID, guest protocol, and SHA-256;
+new sessions verify the cloned disk digest before boot.
 
 The ABox application-support root, every session directory, and every preserved
 disk directory must be mode `0700`. Cleanup resolves and validates every target
@@ -522,9 +535,10 @@ path outside that root.
 
 ## 8. Guest Image
 
-The current guest is a 768 MiB raw ext4 ARM64 Linux root filesystem packed
-with Docker. Docker is used only to build or update the golden filesystem and
-is not on the session execution path. The image contains:
+The current guest is a 768 MiB raw ext4 Linux root filesystem for amd64 or
+arm64. macOS packs it with Docker; Linux uses a rootless native builder based on
+checksum-pinned `apk.static`, `fakeroot`, and `mke2fs -d`. Docker is never on
+the session execution path. The image contains:
 
 - The statically compiled `abox-guest` worker
 - A POSIX-compatible shell
@@ -535,10 +549,10 @@ is not on the session execution path. The image contains:
 - No systemd, SSH server, Docker engine, graphical stack, or idle package
   daemon
 
-A reproducible controlled build, signed or checksummed manifest, image
-identity, digest verification, vulnerability-update policy, and measured
-compressed-image budget remain first-milestone requirements. The future image
-pipeline must:
+A controlled build, architecture-tagged schema-1 manifest, image identity, and
+digest verification are implemented. Release reproducibility evidence,
+vulnerability-update policy, and measured compressed-image budget remain
+first-milestone requirements. The release pipeline must:
 
 - Run in a controlled CI or Linux build environment.
 - Produce a raw disk image or a trusted kernel plus raw root disk supported by
@@ -548,9 +562,9 @@ pipeline must:
 - Keep the immutable base image separate from per-session writable copies.
 - Provide a documented update process for guest OS vulnerabilities.
 
-On APFS, ABox may use `clonefile` to create an efficient copy-on-write session
-disk. On filesystems where cloning is unavailable, it must make a full private
-copy. It must never fall back to a read-write directory mount.
+On APFS, ABox uses `clonefile` when available. Linux tries FICLONE, then
+`copy_file_range`, then a full copy. Other filesystems use a full private copy.
+It never falls back to a read-write directory mount.
 
 The initial image will not contain every language toolchain. Missing toolchains
 must be reported as image limitations rather than bypassed through host
@@ -571,22 +585,25 @@ brokered fetches.
 
 ## 9. Source Provisioning
 
-The current implementation accepts any host directory. It snapshots exactly
-the requested directory and does not discover a Git root or inspect host
-branches, commits, ignore rules, or working state.
+The current implementation requires a Git worktree and discovers its root from
+the selected path. Clean worktrees archive committed `HEAD`. Dirty or
+commitless worktrees are copied into a private host-side repository before
+transfer so host Git remains unchanged.
 
 ### 9.1 Preconditions
 
-ABox requires a readable directory. It includes regular files, dotfiles, and
-empty directories, preserves executable bits, excludes files or directories
-named `.git`, and rejects symlinks and unsupported special files. The snapshot
-is bounded to the same entry, per-file, and total-byte limits enforced by the
-guest extractor. Host Git and host Git configuration are not required.
+ABox requires a readable Git worktree without submodules. Dirty snapshots use
+`git ls-files --cached --others --exclude-standard`, which includes tracked
+files and non-ignored untracked files while omitting ignored build output,
+caches, and local secrets. Executable bits are preserved; `.git`, active ABox
+state, symlinks, and unsupported special files are excluded. The archive is
+bounded to the same entry, per-file, and total-byte limits enforced by the
+guest extractor.
 
 ### 9.2 Transfer
 
-The host creates a bounded tar snapshot directly with the Go standard library
-and streams bounded chunks over authenticated RPC.
+The host creates a bounded archive from committed `HEAD` or from the private
+dirty-tree commit and streams bounded chunks over authenticated RPC.
 
 The guest extraction code must reject:
 
@@ -627,8 +644,9 @@ The current host-guest RPC protocol is version 4. Normal CLI and SDK sessions
 require protocol 4. `abox --probe-vm` may speak to an older guest only far
 enough to perform its limited probe.
 
-The transport is bounded length-prefixed JSON over virtio-vsock. On macOS,
-libkrun maps the selected vsock port to a protected Unix socket.
+The transport is bounded length-prefixed JSON over virtio-vsock. libkrun maps
+the selected guest vsock port to a protected host Unix socket on the implemented
+macOS/HVF and Linux/KVM paths.
 
 Protocol history:
 
@@ -1012,8 +1030,9 @@ blocks while preserving the assistant content needed for subsequent turns.
 ### 13.4 Credentials
 
 - LLM credentials and MCP tokens remain host-side.
-- Approved host sources are env-backed storage, macOS keychain, Vault KV v2,
-  Azure Key Vault, and AWS Secrets Manager.
+- Approved host sources are env-backed storage, the OS `keystore` (macOS
+  Keychain or Linux Secret Service), Vault KV v2, Azure Key Vault, and AWS
+  Secrets Manager. `keychain` and `secretservice` remain input aliases.
 - Credential references may be stored in `config.yaml`; resolved values are
   not.
 - Resolved values are never written to session logs, `guest-config.json`,
@@ -1383,15 +1402,15 @@ because it is a reviewed user action owned by the trusted control plane.
 
 The first lifecycle is:
 
-1. Validate configuration and repository state.
+1. Validate configuration and the selected readable source directory.
 2. Create a mode `0700` session directory.
-3. Capture repository baseline metadata.
+3. Discover the Git root and capture a bounded clean or private dirty snapshot.
 4. Verify the trusted guest image.
 5. Clone or copy a private writable session disk.
 6. Start `abox-vmm` with a fixed device plan.
 7. Wait for authenticated guest readiness and set the guest clock from the
    host clock.
-8. Transfer the selected clean or ephemeral repository snapshot.
+8. Transfer the repository snapshot, excluding `.git` and host-only state.
 9. Run the agent and tool loop.
 10. Idle-stop and resume the same session disk when resource policy requires.
     Set the guest clock again after every resume.
@@ -1406,6 +1425,12 @@ The first lifecycle is:
 17. Destroy or preserve the private disk according to the session setting.
 18. Persist compact session state and a redacted audit summary.
 
+Current orderly stop begins with the guest shutdown RPC. If the helper remains,
+macOS sends interrupt while Linux sends SIGTERM; both use a bounded wait,
+SIGKILL if required, and final `Wait`. The Linux CLI routes SIGINT, SIGTERM, and
+SIGHUP through cleanup. Supervisor death closes the inherited liveness pipe so
+the helper does not keep an unmanaged VM running.
+
 Unexpected supervisor termination should cause the VMM helper to terminate or
 be recoverable through recorded process and session metadata. Stale session
 cleanup must never delete paths outside ABox's protected session root.
@@ -1415,7 +1440,7 @@ cleanup must never delete paths outside ABox's protected session root.
 The host stores structured records for:
 
 - Session identifier
-- Repository identity and baseline commit
+- Source-directory identity and private guest baseline
 - Selected provider and model
 - Connectivity mode
 - Runtime backend and image digest
@@ -1456,7 +1481,8 @@ and clearly distinguish implemented-but-unverified controls from future work.
 - Supported platform and backend
 - Clear security disclaimer
 - Explicit statement that the project is experimental
-- Clean and ephemeral dirty-tree snapshot behavior
+- Git-aware clean and dirty worktree snapshot behavior
+- Architecture-specific image/manifest and platform build requirements
 - Link to architecture and threat model
 
 ### 19.2 `docs/architecture.md`
@@ -1506,7 +1532,7 @@ Initial ADRs:
 - ADR-0005: Separate guest network isolation from host connectivity routing
 - ADR-0006: Use native provider adapters behind a common model interface
 - ADR-0007: Use a dedicated VMM helper process for the cgo boundary
-- ADR-0008: Use clean `HEAD` archives or private dirty/unborn snapshots
+- ADR-0008: Use private Git-aware source snapshots without modifying host Git
 - ADR-0009: Enforce lightweight default resource budgets
 - ADR-0010: Use cold disk checkpoints for rollback and fork
 - ADR-0011: Use a semantic host broker for remote MCP and keep future stdio MCP in the guest
@@ -1550,7 +1576,7 @@ release.
 **Status note:** These phase checklists are the acceptance roadmap, not a
 claim that implementation proceeded in this order. Development advanced out
 of order: protocol 4, the public SDK, TUI, basic resume, host LLM/MCP brokers,
-host-only credentials, dirty-tree snapshots, and `run_command` approval exist,
+host-only credentials, exact-directory snapshots, and `run_command` approval exist,
 while several earlier documentation, image, runtime-hardening, and hardware
 gates remain incomplete. Completing an implementation task does not imply
 that its phase exit criteria or security evidence passed.
@@ -1559,17 +1585,18 @@ that its phase exit criteria or security evidence passed.
 
 - Record the selected Go module path, `github.com/AdminTurnedDevOps/ABox`.
 - Record the selected Apache-2.0 license.
-- Confirm the minimum macOS version.
-- Pin a maintained stable libkrun release and compatible libkrunfw artifact.
+- Confirm the minimum macOS version and the Linux package/kernel baselines.
+- Pin maintained libkrun and compatible libkrunfw artifacts per platform.
 - Decide whether runtime artifacts are downloaded, bundled, or discovered from
   an installation.
-- Record the current `~/.abox` session/image layout and name the Apple Silicon
-  resource baseline machine.
+- Record the current `~/.abox` session/image layout and name separate macOS/HVF
+  and Linux/KVM resource baseline machines.
 - Name the demonstration repository and the exact guest toolchain set used to
   judge the image-size budget.
 - Secure a dedicated Apple Silicon host that can run Hypervisor.framework
-  without nested virtualization. GitHub-hosted macOS ARM runners are not
-  sufficient for Phase 0.5, Phase 6, or Phase 18.
+  without nested virtualization, plus native x86_64 Arch and Fedora KVM hosts.
+  Generic GitHub-hosted or container runners are not sufficient for Phase 0.5,
+  Phase 6, or Phase 18 hardware evidence.
 - Write draft `docs/architecture.md`, `docs/threat-model.md`, and ADR-0002
   marked Planned. These drafts exist so the spike has a written target.
   They must not claim a verified isolation profile.
@@ -1585,12 +1612,13 @@ Exit criteria:
 
 ### Phase 0.5: libkrun Boot Spike
 
-The product VMM path now boots with the intended device-plan calls, but the
-disposable research record and named-hardware evidence required by this phase
-do not exist. Reproduce the product call sequence on the dedicated Apple
-Silicon host and record the evidence without treating a successful boot as
-proof of isolation. Isolation claims stay Planned until the hardware suite
-passes.
+The product VMM path now contains the intended device-plan calls for macOS/HVF
+and Linux/KVM, but the disposable research records and named-hardware evidence
+required by this phase do not exist. Reproduce and record the product call
+sequence independently on the dedicated Apple Silicon host, pinned Arch KVM
+host, and pinned Fedora KVM host. A successful build or boot is not proof of
+isolation. Each backend's isolation claims stay Planned until its own Phase 18
+suite passes.
 
 - Link the pinned libkrun and libkrunfw from a narrow cgo helper.
 - Compare the current 1.19-style product API to `containers/libkrun` main and
@@ -1633,7 +1661,7 @@ Exit criteria:
   hazards explicitly. Do not document `krun_disable_implicit_*` as required
   APIs unless the chosen pin still has them.
 - Document origin rewrite, untrusted repo instructions, checkpoint quiesce,
-  dirty-tree-after-import, and resource-metric definitions.
+  source-directory changes after snapshot/import, and resource-metric definitions.
 - Do not describe the section 5.2 profile as verified until Phase 0.5 passes.
 
 Exit criteria:
@@ -1699,7 +1727,7 @@ Exit criteria:
 
 ### Phase 5: Guest Image
 
-- Build the ARM64 Linux image reproducibly.
+- Build architecture-tagged amd64 and arm64 Linux images reproducibly.
 - Install the guest worker and required tooling.
 - Publish and verify an image manifest and digest.
 - Add image boot-readiness tests.
@@ -1732,15 +1760,18 @@ Exit criteria:
   format.
 - Unit tests do not claim to prove what libkrun would do if TSI were left
   implicit. That proof is a Phase 0.5 and Phase 18 guest probe.
-- A real Apple Silicon integration test boots and communicates with the guest.
+- Real Apple Silicon/HVF and separate Arch/Fedora x86_64 KVM integration tests
+  boot and communicate with the matching guest. Until the Linux records exist,
+  Linux runtime/release support stays Planned.
 - Device inspection shows no network device and no host-path filesystem
   share.
 
 ### Phase 7: Source Transfer
 
-- Snapshot exactly the selected host directory without requiring host Git.
-- Include regular files, dotfiles, and empty directories; preserve executable
-  bits and exclude `.git` metadata.
+- Discover the selected Git worktree and snapshot clean `HEAD` or a private
+  dirty-tree commit.
+- Include tracked and non-ignored untracked files; preserve executable bits and
+  exclude ignored files, `.git` metadata, and active ABox state.
 - Reject symlinks and unsafe or unsupported file types.
 - Stream and safely extract the selected snapshot in the guest.
 - Initialize the private guest baseline.
@@ -1748,7 +1779,7 @@ Exit criteria:
 
 Exit criteria:
 
-- Plain directories and directories containing Git metadata transfer correctly.
+- Clean, dirty, and commitless Git worktrees transfer correctly.
 - Unsafe symlinks, special files, and malicious archive paths fail clearly.
 - Malicious archive-path tests are rejected.
 
@@ -1885,8 +1916,9 @@ Exit criteria:
 - Freeze the guest filesystem, acknowledge while frozen, then stop and
   flush before creating a cold checkpoint. Thaw only if aborting while the
   VM is still running.
-- Clone the raw disk using APFS copy-on-write where available. Never attach
-  a checkpoint file writable. Clone again before every boot.
+- Clone the raw disk using APFS `clonefile` or Linux FICLONE where available,
+  then the platform copy fallback. Never attach a checkpoint file writable.
+  Clone again before every boot.
 - Store the checkpoint bundle: disk identity and digest, host event cursor,
   working context, continuation state, instructions, and approvals.
 - Keep the session audit log append-only.
@@ -1944,8 +1976,8 @@ Exit criteria:
 
 Exit criteria:
 
-- Default-path measurements meet the resource budgets on the named baseline
-  machine.
+- Default-path measurements meet the resource budgets on each named supported
+  platform baseline machine.
 - Any exception is documented with evidence and accepted through an ADR.
 
 ### Phase 18: Security Acceptance
@@ -2014,8 +2046,11 @@ Exit criteria:
 
 ### 21.4 Hardware Security Tests
 
-These tests require a real Apple Silicon host capable of hardware
-virtualization. A mocked libkrun API is not sufficient evidence.
+These tests require real named hardware: Apple Silicon for
+Hypervisor.framework, plus native x86_64 KVM hosts for both pinned Arch and
+Fedora baselines. A mocked libkrun API, container job, WSL2 environment, or
+successful boot probe is not sufficient evidence. Evidence is backend- and
+baseline-specific and must identify the exact artifact digest.
 
 The suite should:
 
@@ -2049,25 +2084,24 @@ The suite should:
 
 ## 22. Security Acceptance Matrix
 
-| Acceptance criterion | Enforcement | Required evidence |
-| --- | --- | --- |
-| Guest cannot read host home | No host filesystem device | Real guest canary probe plus device inspection |
-| Guest cannot read SSH keys | No host filesystem device | Synthetic SSH canary probe |
-| Guest cannot read cloud credentials | No host filesystem device and no credential forwarding | Synthetic credential canary probe and RPC review |
-| Repository is not mounted read-write | Private raw disk only | Device-plan test, guest mount inspection, host hash comparison |
-| Guest cannot reach host or LAN | No net device and `krun_add_vsock(ctx, 0)` | Guest-local loopback works; host canary, LAN, and external probes fail |
-| Model shell commands execute in guest | Agent dispatches only typed RPC | Fake-provider dispatch test and real guest command test |
-| Destructive guest command cannot damage host | Hardware VM and no host mounts | Host canaries survive destructive guest test |
-| Guest cannot access Docker socket | No host filesystem or socket forwarding | Synthetic socket probe and device inspection |
-| Changes return only through review | No shared workspace and gated import | Reject/approve end-to-end tests |
-| ABox works without agentgateway | Direct provider adapter | End-to-end direct-mode test |
-| Gateway does not weaken isolation | Connectivity independent from runtime plan | Device-plan equality and real guest probes |
-| MCP does not expose a host shell | Guest stdio execution and endpoint-bound broker | Local and remote MCP integration tests |
-| Guest cannot induce arbitrary host fetches | Identifier-to-endpoint mapping; no raw URL method | SSRF, redirect, header, and unconfigured-origin tests |
-| Repo instructions cannot relax policy | Host config is the only policy source | Hostile `AGENTS.md` fixture cannot change approvals or limits |
-| Checkpoints are independent | ABox-enforced bundle: frozen disk clone plus host cursor | Rollback restores disk and working context; parent files stay read-only; audit stays append-only |
-| Default use is lightweight | Explicit budgets and on-demand lifecycle | Named-host resource benchmark report |
-| Unimplemented controls are visible | Explicit feature status | Documentation and generated status report |
+| Acceptance criterion | Enforcement | macOS/HVF evidence | Linux/KVM evidence |
+| --- | --- | --- | --- |
+| Guest cannot read host home | No host filesystem device | Apple Silicon Phase 0.5/18 canary + device inspection | Separate Arch and Fedora Phase 0.5/18 canary + device inspection; Planned |
+| Guest cannot read SSH/cloud credentials | No host filesystem device and no credential forwarding | Synthetic canaries + RPC review | Same tests on both pinned KVM baselines; Planned |
+| Repository is not mounted read-write | Private raw disk only | Device plan, mounts, host hash | Same tests on both pinned KVM baselines; Planned |
+| Guest cannot reach host or LAN | No net device and `krun_add_vsock(ctx, 0)` | Loopback works; host/LAN/external/Unix canaries fail | Independent KVM inet/Unix TSI probes on Arch and Fedora; Planned |
+| Model shell commands execute in guest | Agent dispatches only typed RPC | Fake-provider + real guest command | Same code tests plus real KVM guest command; Planned |
+| Destructive guest command cannot damage host | Hardware VM and no host mounts | Host canaries survive | Host canaries survive on Arch and Fedora; Planned |
+| Guest cannot access Docker socket | No host filesystem or socket forwarding | Synthetic socket probe + devices | Same tests on both KVM baselines; Planned |
+| Changes return only through review | No shared workspace and gated import | Reject/approve end-to-end | Same test on both KVM baselines after import exists |
+| ABox works without agentgateway | Direct provider adapter | End-to-end direct mode | Same integration test on both KVM baselines; Planned where runtime-dependent |
+| Gateway does not weaken isolation | Connectivity independent from runtime plan | Device-plan equality + guest probes | Same tests on both KVM baselines; Planned |
+| MCP does not expose a host shell | Guest stdio execution and endpoint-bound broker | Local/remote MCP integration | Same integration tests on both KVM baselines; Planned where runtime-dependent |
+| Guest cannot induce arbitrary host fetches | Identifier-to-endpoint mapping; no raw URL method | SSRF, redirect, header, and origin tests | Same integration tests on both KVM baselines; Planned where runtime-dependent |
+| Repo instructions cannot relax policy | Host config is the only policy source | Hostile `AGENTS.md` fixture | Platform-independent code evidence; repeat integration per backend |
+| Checkpoints are independent | Frozen disk clone plus host cursor | Rollback/lineage hardware test | Same tests on both KVM baselines after checkpoint support exists |
+| Default use is lightweight | Explicit budgets and on-demand lifecycle | Named Apple Silicon report | Separate named Arch and Fedora reports; Planned |
+| Unimplemented controls are visible | Explicit feature status | Documentation/status report | Documentation/status report; Linux support remains Planned until complete |
 
 Passing unit tests prove code intent but do not, by themselves, prove guest
 isolation. Hardware-backed tests are required before describing those controls
@@ -2077,10 +2111,12 @@ as verified.
 
 The milestone is complete when a user can:
 
-1. Start `abox` in a Git repository on Apple Silicon, using either a clean
-   `HEAD` archive or a private ephemeral snapshot of a dirty or unborn tree.
+1. Start `abox` anywhere inside a Git worktree on a qualified host. macOS/arm64
+   is the current runnable path; Linux/x86_64 joins only after both pinned KVM
+   gates pass. Snapshot the discovered repository without modifying host Git.
 2. Select a configured OpenAI, Anthropic, or Grok model.
-3. Start a real libkrun hardware-isolated ARM64 Linux microVM.
+3. Start the matching amd64 or arm64 Linux guest through the qualified libkrun
+   backend. Hardware isolation remains a claim only after Phase 18 evidence.
 4. Transfer the captured repository privately into the guest.
 5. Enter a prompt in the dark full-screen TUI.
 6. Watch model text and tool activity stream in the terminal.
@@ -2125,7 +2161,7 @@ Do not implement yet:
 - Browser automation
 - OBO or enterprise identity
 - Semantic authorization policies
-- Cross-platform runtime support
+- Windows and additional unimplemented VMM backends
 - Rich IDE integrations
 - A cloud control plane
 - Production deployment
@@ -2167,7 +2203,8 @@ enforcement mechanism.
 - Live memory snapshots where supported and verifiable
 - Faster incremental checkpoints
 - Concurrent opt-in fork execution with explicit resource budgets
-- Alternative Linux/KVM backend validation
+- Additional Linux architectures and KVM baseline expansion after the initial
+  Arch/Fedora x86_64 gate
 - Windows backend research
 
 ### Phase D: Multi-Agent and Enterprise Features
@@ -2182,9 +2219,14 @@ These phases require separate ADRs and threat-model updates.
 
 ## 26. Assumptions
 
-- The first host is Apple Silicon running a supported modern macOS release.
-- The host supports Hypervisor.framework and permits hardware virtualization.
-- The first guest can be ARM64 Linux.
+- macOS/arm64 with Hypervisor.framework is the current runnable host path.
+- Linux amd64/arm64 KVM code and build paths are implemented, but initial Linux
+  runtime/release support is x86_64 and remains Planned until separate Arch and
+  Fedora Phase 0.5/18 evidence passes.
+- WSL2 and containerized VMM execution are unsupported. Containers may compile,
+  link, test, and build images without making a runtime claim.
+- Guests are Linux amd64 or arm64 and must match the host architecture recorded
+  in the adjacent image manifest.
 - Source directories do not require Git. Host Git metadata and state do not
   participate in snapshotting or session identity.
 - Provider HTTPS originates from the trusted host broker; the model loop and
@@ -2197,17 +2239,17 @@ These phases require separate ADRs and threat-model updates.
   these modes changes the guest device plan.
 - Planned package adapters will use origin rewrite rather than HTTP(S) proxy
   variables; no package adapter exists today.
-- Users accept that regular files in the selected source directory are included
-  regardless of Git ignore rules, except `.git` metadata itself.
+- Users accept that tracked files and non-ignored untracked files are included;
+  ignored files, `.git` metadata, and active ABox state are omitted.
 - Users accept that the initial image has a limited toolchain set.
 - Users accept that a successful future patch import modifies the host source directory.
 - The host and local administrator are trusted.
 - The guest, model output, generated code, repository content, and
   repo-sourced instruction files are untrusted. Host configuration is the
   only source of approval, connectivity, limit, and tool-allowlist policy.
-- Phase 0.5, Phase 6, and Phase 18 require a dedicated Apple Silicon host
-  that can use Hypervisor.framework. Nested cloud macOS runners are not that
-  host.
+- Phase 0.5, Phase 6, and Phase 18 require dedicated hardware per backend:
+  Apple Silicon/HVF and separate native x86_64 Arch/Fedora KVM hosts. Nested
+  cloud runners, WSL2, and containers are not substitutes.
 
 ## 27. Resolved Decisions and Open Work
 
@@ -2219,24 +2261,30 @@ Resolved decisions:
 - Primary storage root: `~/.abox`, overridable with `ABOX_HOME`
 - Current host-guest protocol: 4
 - Current documented runtime: libkrun 1.19.4-style API
+- Linux package baselines: Arch 2026-09-17 snapshot with
+  libkrun 1.19.4-1/libkrunfw 5.5.0-1; Fedora 44 with
+  libkrun/libkrun-devel 1.19.0-1.fc44/libkrunfw 5.5.0-1.fc44
 - Current guest launch: `krun_set_exec`
 - Current remote MCP path: host Streamable HTTP broker
-- Current source path: bounded filesystem snapshot of the exact configured directory
+- Current source path: bounded clean-HEAD or private dirty-worktree Git snapshot
+- Current image identity: `abox-guest-linux-<arch>.raw` plus adjacent schema-1
+  manifest; Linux rootless native builder and macOS Docker builder
+- Current local credential source: canonical `keystore`, dispatched to macOS
+  Keychain or Linux Secret Service
 
 Still open or incomplete:
 
 - Minimum supported macOS version
-- Exact pinned libkrun and libkrunfw versions, including whether the pin is
-  `stable-1.19.x` or a main-line commit after the implicit-API removal
-- Recorded Phase 0.5 evidence for the current `krun_set_exec`,
-  `krun_add_vsock(ctx, 0)`, two-disk boot and vsock direction
+- Recorded platform-specific Phase 0.5 evidence for the current
+  `krun_set_exec`, `krun_add_vsock(ctx, 0)`, two-disk boot and vsock direction:
+  Apple Silicon/HVF plus separate pinned Arch/Fedora KVM records
 - Guest-side rewrite rules for pip, npm, and cargo absolute follow-up URLs
 - Runtime artifact distribution and code-signing approach
-- Reproducible guest image build environment
+- Release reproducibility evidence for both guest image build environments
 - Image update and vulnerability-response policy
 - Named demonstration repository and toolchain set for the image budget
-- Named Apple Silicon baseline machine for resource budgets
-- Dedicated non-nested Apple Silicon hardware runner, decided in Phase 0
+- Named Apple Silicon, Arch, and Fedora baseline machines for resource budgets
+- Dedicated non-nested Apple Silicon and native Arch/Fedora hardware runners
 - Validation or evidence-based adjustment of the initial resource budgets
 - Exact explicit-confirmation interaction for patch import
 - Go sum-database policy for origin-rewritten `GOPROXY`

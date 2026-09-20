@@ -39,11 +39,11 @@ func TestCredsMigrateRemovesSuccessAndRefreshButKeepsFailure(t *testing.T) {
 		}
 	}
 
-	origAvailable := migrationKeychainAvailable
-	origSet := migrationSetKeychain
-	migrationKeychainAvailable = func() bool { return true }
+	origAvailable := migrationKeystoreAvailable
+	origSet := migrationSetKeystore
+	migrationKeystoreAvailable = func() bool { return true }
 	called := map[string]bool{}
-	migrationSetKeychain = func(_ context.Context, name string, _ []byte) error {
+	migrationSetKeystore = func(_ context.Context, name string, _ []byte) error {
 		called[name] = true
 		if name == "FAILED_KEY" || name == "MODEL_REFRESH" || name == "MCP_CRED_REFRESH" {
 			return errors.New("write failed")
@@ -51,11 +51,11 @@ func TestCredsMigrateRemovesSuccessAndRefreshButKeepsFailure(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() {
-		migrationKeychainAvailable = origAvailable
-		migrationSetKeychain = origSet
+		migrationKeystoreAvailable = origAvailable
+		migrationSetKeystore = origSet
 	})
 
-	if err := credsMigrate(); err != nil {
+	if err := credsMigrate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	remaining, err := credentials.Load()
@@ -66,7 +66,7 @@ func TestCredsMigrateRemovesSuccessAndRefreshButKeepsFailure(t *testing.T) {
 		t.Fatalf("remaining credentials %#v", remaining)
 	}
 	if called["MCP_CRED_REFRESH_REFRESH"] || called["MCP_TOKEN_REFRESH"] {
-		t.Fatal("known legacy refresh token was sent to the keychain")
+		t.Fatal("known legacy refresh token was sent to the keystore")
 	}
 	if !called["MODEL_REFRESH"] || !called["MCP_CRED_REFRESH"] {
 		t.Fatalf("configured refresh-suffixed credentials were dropped: calls %#v", called)
@@ -75,7 +75,7 @@ func TestCredsMigrateRemovesSuccessAndRefreshButKeepsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := savedCfg.Models[0].CredentialReference(); got != (config.CredentialRef{Source: "keychain", Name: "CUSTOM_SOURCE"}) {
+	if got := savedCfg.Models[0].CredentialReference(); got != (config.CredentialRef{Source: "keystore", Name: "CUSTOM_SOURCE"}) {
 		t.Fatalf("custom reference %#v", got)
 	}
 	if got := savedCfg.Models[1].CredentialReference(); got != (config.CredentialRef{Source: "env", Name: "FAILED_KEY"}) {
@@ -116,13 +116,13 @@ func TestUpsertCredentialRefsUsesEffectiveEnvReference(t *testing.T) {
 	if !upsertCredentialRefs(&cfg, "CUSTOM_ENV") {
 		t.Fatal("custom env reference was not changed")
 	}
-	if got := cfg.Models[3].CredentialReference(); got != (config.CredentialRef{Source: "keychain", Name: "CUSTOM_ENV"}) {
+	if got := cfg.Models[3].CredentialReference(); got != (config.CredentialRef{Source: "keystore", Name: "CUSTOM_ENV"}) {
 		t.Fatalf("custom env reference %#v", got)
 	}
 	if !upsertCredentialRefs(&cfg, "CUSTOM_MCP_ENV") {
 		t.Fatal("custom MCP env reference was not changed")
 	}
-	if got := cfg.MCPServers[0].CredentialReference(); got != (config.CredentialRef{Source: "keychain", Name: "CUSTOM_MCP_ENV"}) {
+	if got := cfg.MCPServers[0].CredentialReference(); got != (config.CredentialRef{Source: "keystore", Name: "CUSTOM_MCP_ENV"}) {
 		t.Fatalf("custom MCP env reference %#v", got)
 	}
 }

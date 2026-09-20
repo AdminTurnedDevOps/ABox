@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -11,6 +13,32 @@ import (
 
 	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
+
+func TestExtractTarAllowsLargeFileWithinArchiveBudget(t *testing.T) {
+	body := make([]byte, 33<<20)
+	var archive bytes.Buffer
+	tw := tar.NewWriter(&archive)
+	if err := tw.WriteHeader(&tar.Header{Name: "dependency.zip", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	if err := ExtractTar(bytes.NewReader(archive.Bytes()), dest); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dest, "dependency.zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != int64(len(body)) {
+		t.Fatalf("size=%d want=%d", info.Size(), len(body))
+	}
+}
 
 func TestBuiltinSpecsCount(t *testing.T) {
 	if n := len(BuiltinSpecs()); n != 5 {

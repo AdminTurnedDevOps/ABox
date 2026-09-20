@@ -14,25 +14,25 @@ import (
 )
 
 var (
-	migrationKeychainAvailable = credsource.KeychainAvailable
-	migrationSetKeychain       = credsource.SetKeychain
+	migrationKeystoreAvailable = credsource.OSKeystoreAvailable
+	migrationSetKeystore       = credsource.SetOSKeystore
 )
 
-func runCreds(args []string) error {
+func runCreds(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: abox creds migrate  (move credentials.env entries to the macOS keychain)")
+		return fmt.Errorf("usage: abox creds migrate  (move credentials.env entries to the OS keystore)")
 	}
 	switch args[0] {
 	case "migrate":
-		return credsMigrate()
+		return credsMigrate(ctx)
 	default:
 		return fmt.Errorf("unknown creds command %q (try: abox creds migrate)", args[0])
 	}
 }
 
-func credsMigrate() error {
-	if !migrationKeychainAvailable() {
-		return fmt.Errorf("macOS keychain unavailable (this command needs /usr/bin/security on darwin); the env credential source keeps working")
+func credsMigrate(parent context.Context) error {
+	if !migrationKeystoreAvailable() {
+		return fmt.Errorf("OS keystore unavailable; credentials.env remains available as a mode 0600 plaintext fallback")
 	}
 	cfg, _, err := config.Load()
 	if err != nil {
@@ -47,7 +47,7 @@ func credsMigrate() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
 	remaining := make(map[string]string, len(creds))
@@ -64,7 +64,7 @@ func credsMigrate() error {
 			dropped++
 			continue
 		}
-		if err := migrationSetKeychain(ctx, name, []byte(creds[name])); err != nil {
+		if err := migrationSetKeystore(ctx, name, []byte(creds[name])); err != nil {
 			fmt.Printf("skipped %s: %v (entry stays in the file; set it manually or re-login)\n", name, err)
 			failed++
 			continue
@@ -75,7 +75,7 @@ func credsMigrate() error {
 	}
 	if configChanged {
 		if err := cfg.Save(); err != nil {
-			return fmt.Errorf("keychain writes succeeded but config update failed: %w", err)
+			return fmt.Errorf("keystore writes succeeded but config update failed: %w", err)
 		}
 	}
 	if err := rewriteCredentialFile(remaining); err != nil {
@@ -85,7 +85,7 @@ func credsMigrate() error {
 		fmt.Printf("migrated %d, dropped %d refresh token(s), skipped %d (only skipped entries remain; fix them and run abox creds migrate again)\n", migrated, dropped, failed)
 		return nil
 	}
-	fmt.Printf("migrated %d credential(s) to the macOS keychain (service %s), dropped %d refresh token(s)\n",
+	fmt.Printf("migrated %d credential(s) to the OS keystore (service %s), dropped %d refresh token(s)\n",
 		migrated, credsource.KeychainService, dropped)
 	fmt.Printf("rewrote %s (kept, mode 0600)\n", credentials.Path())
 	return nil
@@ -117,7 +117,7 @@ func upsertCredentialRefs(cfg *config.File, name string) bool {
 		ref := cfg.Models[i].CredentialReference()
 		if ref.Source == "env" && ref.Name == name {
 			cfg.Models[i].CredentialEnv = ""
-			cfg.Models[i].Credential = &config.CredentialRef{Source: "keychain", Name: name}
+			cfg.Models[i].Credential = &config.CredentialRef{Source: "keystore", Name: name}
 			changed = true
 		}
 	}
@@ -125,7 +125,7 @@ func upsertCredentialRefs(cfg *config.File, name string) bool {
 		ref := cfg.MCPServers[i].CredentialReference()
 		if ref.Source == "env" && ref.Name == name {
 			cfg.MCPServers[i].CredentialEnv = ""
-			cfg.MCPServers[i].Credential = &config.CredentialRef{Source: "keychain", Name: name}
+			cfg.MCPServers[i].Credential = &config.CredentialRef{Source: "keystore", Name: name}
 			changed = true
 		}
 	}
@@ -136,7 +136,7 @@ func rewriteCredentialFile(creds map[string]string) error {
 	var body strings.Builder
 	body.WriteString("# ABox credentials. Mode 0600. Do not commit.\n")
 	if len(creds) == 0 {
-		body.WriteString("# Credentials migrated to the macOS keychain; env fallback remains supported.\n")
+		body.WriteString("# Credentials migrated to the OS keystore; env fallback remains supported.\n")
 	} else {
 		for _, name := range sortedCredNames(creds) {
 			body.WriteString(name)

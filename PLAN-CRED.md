@@ -2,6 +2,18 @@
 
 ## Context
 
+**Current-platform note (Sept 2026):** This document preserves the historical
+credential-overhaul sequence. Its macOS-only `keychain` naming is superseded by
+the implemented canonical `keystore` source: macOS dispatches to Keychain and
+Linux dispatches to Secret Service through `secret-tool` plus bounded `gdbus`
+probes. `keychain` and `secretservice` remain accepted aliases; saved config
+uses `keystore`. Linux warns and falls back to `credentials.env` at mode 0600
+when Secret Service is absent, locked, loses its provider, or times out.
+`vault`, `azure`, and `aws` remain cross-platform and are the preferred
+headless Linux sources. Protocol 4 now host-brokers both LLM and remote MCP
+traffic, so later historical statements that MCP tokens still enter the guest
+are also superseded.
+
 At the start of this overhaul, ABox violated the intended host-only LLM credential boundary and stored credential values in session configuration:
 
 - All secrets lived plaintext in `~/.abox/credentials.env` (internal/credentials/credentials.go).
@@ -11,15 +23,24 @@ At the start of this overhaul, ABox violated the intended host-only LLM credenti
 
 User research (Sept 2026) recommends: host-side credential-source abstraction, resolve only the selected model's credential, never persist resolved values, remove secrets from guest config, and move provider transport behind a host broker. **User approved all three phases**, keychain via `security(1)` subprocess (no cgo — `abox` stays plain `go build`), Vault via `VAULT_ADDR`/`VAULT_TOKEN` KV v2.
 
-**Approved source set (user decision, Sept 2026):** `env`, `keychain` (macOS), `vault` (HashiCorp Vault KV v2), `azure` (Azure Key Vault), `aws` (AWS Secrets Manager). All cloud stores via stdlib HTTP or a CLI subprocess — no HashiCorp/Azure/AWS SDKs, no cgo.
+**Current source set:** `env`, `keystore` (macOS Keychain or Linux Secret
+Service), `vault` (HashiCorp Vault KV v2), `azure` (Azure Key Vault), and `aws`
+(AWS Secrets Manager). `keychain` and `secretservice` are accepted aliases. All
+cloud stores use stdlib HTTP or a CLI subprocess; there are no
+HashiCorp/Azure/AWS SDKs and no cgo in `abox`.
 
-**Deferred (documented, not built):** Kubernetes sources, workload identity federation (Azure managed identity, AWS IAM roles — this milestone uses static SP/env credentials only), MCP traffic brokering (guest MCP client keeps its TSI path this milestone; PLAN.md §14.4 is the follow-up that removes MCP tokens from the guest), agentgateway LLM routing (stays "direct base_url" exactly as today — flagged, never claimed enforced, per PLAN.md §14.3).
+**Still deferred:** Kubernetes sources, workload identity federation (Azure
+managed identity and AWS IAM roles; this milestone uses static SP/env
+credentials), and agentgateway LLM routing. The historical protocol-3 plan also
+deferred MCP traffic brokering, but protocol 4 has since implemented the host
+MCP broker and removed MCP tokens from the guest.
 
 ## Global decisions
 
 1. New host-only package `internal/credsource`; `internal/credentials` stays as the credentials.env file store (env-source backend + fallback writer). Import direction: `credsource` may import `config`; `config` never imports `credsource`.
 2. Cloud secret stores via stdlib HTTP or CLI subprocess only — no HashiCorp/Azure/AWS SDK dependency, no cgo: Vault = one `GET /v1/<mount>/data/<path>` with `X-Vault-Token`; Azure Key Vault = stdlib OAuth2 client-credentials token POST plus `GET {vault}/secrets/{name}` Data Plane REST; AWS Secrets Manager = in-package SigV4 over `GetSecretValue` REST with static env credentials.
-3. `_REFRESH` write: **delete it** (oauth.go:83). Future work note: persist client_id + refresh token in keychain, implement the refresh grant.
+3. `_REFRESH` write: **delete it** (oauth.go:83). Future work note: persist
+   client ID + refresh token in the OS keystore and implement the refresh grant.
 4. One protocol bump, `protocol.Version` 2 → 3, at Phase 3. Phase 2 needs no protocol change: v2 guests already implement `set_model`/`set_mcp_tokens` (cmd/abox-guest/main.go:238-259) and tolerate secretless boot config. Protocol-1 guests cannot run agent sessions from the rewritten secretless config; resume is rejected explicitly rather than reporting a misleading ready state.
 5. Phase 3 is **version-gated, not a config mode**: proto ≥ 3 guest binaries have no direct provider transport (broker is the only LLM path); proto == 2 guests get the legacy post-hello secret push + stderr deprecation warning. No `model_transport` knob.
 6. Phase 3 prerequisite: before the reader-goroutine demux, the host could not receive guest-initiated frames because `Sandbox.Call` read the connection inline and dropped frames outside its awaited ID. Task 3.1 supplied that demux before broker methods were enabled.
@@ -37,7 +58,7 @@ type Value struct { Bytes []byte; Version string; ExpiresAt time.Time; LeaseID s
 func (v *Value) Zero()           // best-effort overwrite
 func (v Value) String() string   // "credsource.Value(redacted)" — defeats accidental %v logging
 type Source interface { Resolve(context.Context, Reference) (Value, error); Close() error }
-type Resolver struct{ ... }      // registers env, keychain (darwin), vault
+type Resolver struct{ ... }      // registers env, portable keystore, cloud sources
 var ErrNotFound, ErrLocked error
 ```
 Errors mention only Source/Name, never values.
@@ -76,19 +97,23 @@ models:
     provider: anthropic
     model: claude-sonnet-4-20250514
     credential:
-      source: keychain          # env | keychain | vault | azure | aws
-      name: ANTHROPIC_API_KEY   # env: var; keychain: account; vault: KV-v2 path; azure: secret URI; aws: secret ID
+      source: keystore         # env | keystore | vault | azure | aws
+      name: ANTHROPIC_API_KEY  # env: var; keystore: account; vault: KV-v2 path; azure: secret URI; aws: secret ID
       field: api_key            # vault/aws only (vault default "value"; aws unset = whole SecretString)
       version: "4"              # vault/azure only (optional)
     # credential_env: X         # DEPRECATED alias == {source: env, name: X}
 mcp_servers:
   - name: github
     url: https://...
-    credential: {source: keychain, name: ABOX_MCP_GITHUB_TOKEN}
+    credential: {source: keystore, name: ABOX_MCP_GITHUB_TOKEN}
 ```
 - `CredentialRef` struct in `config`; `Model.Credential *CredentialRef`, `MCPServer.Credential *CredentialRef`.
 - `Model.CredentialReference()`: explicit ref, else `{env, CredentialEnv}`, else `{env, EnvName()}`. New `Model.EnvName()`: CredentialEnv, else canonical provider env from `DefaultProviders()`, else `ABOX_MODEL_<NAME>_KEY` — fills `protocol.GuestModel.CredentialEnv` (ToGuest, config.go:250) so Phase-1 wire format is unchanged. `MCPServer.CredentialReference()` reuses `TokenEnv` (config.go:376).
-- Validate: reject both `credential` and `credential_env` set; source ∈ {env, keychain, vault, azure, aws}; env names pass `ValidEnvName`; `field` vault/aws only; `version` vault/azure only; azure `name` must be an `https://…vault.azure.net/secrets/…` (or other region suffix) URI.
+- Validate: reject both `credential` and `credential_env` set; canonical source
+  is one of `env`, `keystore`, `vault`, `azure`, or `aws`; accepted local-store
+  aliases canonicalize to `keystore`; env names pass `ValidEnvName`; `field` is
+  vault/aws only; `version` is vault/azure only; Azure `name` must be an
+  `https://...vault.azure.net/secrets/...` (or other region suffix) URI.
 - **Delete `SecretsFromEnv`** (config.go:281-300) + its test. Replace `Model.CredentialPresent` (config.go:396; sole caller tui.go:444) with resolver-backed presence check so keychain/vault keys don't render "missing". Presence is resolved **once when the picker opens** (cached per session), never in the render path — a `security` subprocess or Vault HTTP call per frame would freeze the TUI.
 - `credsource.FromConfig(config.CredentialRef) Reference` glue.
 
@@ -104,9 +129,18 @@ Uses `cfg.ResolvedMCPServers()` (config.go:307) — offline resolves no MCP toke
 
 ### 1.7 TUI keychain-by-default, migration, mcpauth
 Modify: internal/tui/commands.go (:47, :56), tui.go (:335-389, :444), internal/mcpauth/oauth.go (:57-86), cmd/abox/main.go.
-- `applyProviderKey`: try `SetKeychain`; on success upsert the model's `credential: {keychain, ...}` ref and `cfg.Save()` (config.go:354); status "key saved to macOS keychain (service abox)". On ErrLocked/unavailable, fall back to `credentials.Save` and replace any stale explicit cloud/keychain reference with `credential: {source: env, ...}`. `applyMCPKey` mirrors this selected-source update.
-- `mcpauth.LoginNamed`: same keychain-preferred writer; **delete the `_REFRESH` write**.
-- New CLI `abox creds migrate` (dispatched like `mcp`, main.go:35): move credentials.env entries to keychain (including MCP OAuth tokens; re-login is the fallback for expired ones), update matching config refs, drop `*_REFRESH` keys, rewrite credentials.env to a comment (kept, 0600). No silent startup migration — env source keeps working indefinitely.
+- Current `applyProviderKey`/`applyMCPKey`: try the OS keystore; on success
+  persist canonical `credential: {source: keystore, ...}`. On
+  `ErrLocked`/unavailable/timeout, warn and fall back to `credentials.Save` at
+  mode 0600 with `source: env`.
+- `mcpauth.LoginNamed`: use the same OS-keystore-preferred writer; **delete the
+  `_REFRESH` write**.
+- New CLI `abox creds migrate` (dispatched like `mcp`, main.go:35): move
+  `credentials.env` entries to the available OS keystore (including MCP OAuth
+  tokens; re-login is the fallback for expired ones), update matching config
+  refs to canonical `keystore`, drop `*_REFRESH` keys, and rewrite
+  `credentials.env` to a mode-0600 comment. There is no silent startup
+  migration; the env source keeps working indefinitely.
 
 ### Phase 1 verification
 `go build ./...` && `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/abox-guest` && `go test ./protocol ./internal/... ./pkg/...` && `golangci-lint run ./...`.
@@ -199,7 +233,9 @@ Gates as before + `make build && make image` smoke (`abox --probe-vm`, then a re
 
 ## Risks / notes
 1. Demux refactor (3.1) touches every RPC path incl. cancel edge cases — own PR, existing suite green before broker methods.
-2. Keychain headless/SSH (`abox exec`, locked keychain) → ErrLocked with guidance; use env-source refs in CI. Document.
+2. OS keystore in headless/SSH use may be unavailable or locked. Linux warns
+   before its 0600 plaintext fallback; use `vault`, `azure`, or `aws` when that
+   fallback is unacceptable.
 3. MCP tokens still enter the guest this milestone — accepted; §14.4 brokering is the follow-up.
 4. Zeroing is best-effort (Go GC copies); stated in package docs.
 5. Old `abox` binary resuming a scrubbed session re-writes secrets into config.raw (old Prepare); next new-binary start re-scrubs. Mixed-binary users only.
@@ -211,8 +247,11 @@ Gates as before + `make build && make image` smoke (`abox --probe-vm`, then a re
 - Protocol 3 provider HTTPS and LLM authentication are host-brokered. LLM credential values are absent from the guest and session config; compatibility model metadata, including `base_url` and the credential environment-variable name, remains on the guest config disk but is not trusted for protocol-3 routing.
 - Startup credential resolution is partial: successfully resolved MCP tokens are pushed even if the selected model credential is missing. Missing optional MCP tokens are skipped; other source failures are reported after the partial push. Interactive CLI may continue after reporting the error; headless CLI and SDK startup return it.
 - Protocol-1 resume is rejected after the host rewrites `config.raw` without secrets. Protocol 2 remains the legacy secret-push path; protocol 3 keeps LLM credentials host-side.
-- MCP tokens still enter guest memory through `set_mcp_tokens`; MCP traffic and credential brokering remain follow-up work.
+- Protocol 4 host-brokers remote MCP and keeps MCP tokens out of the guest. The
+  earlier protocol-3 `set_mcp_tokens` status is historical.
 - Session scrubbing reports aggregate per-session errors and aborts CLI/SDK startup if any legacy session could not be scrubbed.
 - Azure and AWS credential-source authentication is limited to static host credentials (or an existing Azure CLI login); managed/workload identity is deferred.
 - `llmbroker.Broker` still has no config-update API. The SDK and TUI therefore install a newly constructed broker after an idle model change so subsequent streams use current aliases, base URLs, and credential references. A broker-owned atomic `UpdateConfig` API would remove direct handler replacement and better define concurrent SDK `SetModel` behavior.
 - Isolation remains **Planned** until the named hardware tests pass.
+- Linux/KVM requires its own Phase 0.5 and Phase 18 evidence on both pinned
+  Arch and Fedora baselines; macOS evidence does not cover it.

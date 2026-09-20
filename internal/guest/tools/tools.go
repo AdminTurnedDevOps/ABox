@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/AdminTurnedDevOps/ABox/protocol"
 )
 
 const (
@@ -177,12 +179,12 @@ func (r Repo) ApplyPatch(patch string) (string, error) {
 	if len(patch) > DefaultMaxOutput {
 		return "", fmt.Errorf("patch too large")
 	}
-	cmd := exec.Command("git", "apply", "--whitespace=nowarn", "-")
+	cmd := guestCommand("git", "apply", "--whitespace=nowarn", "-")
 	cmd.Dir = r.Root
 	cmd.Stdin = strings.NewReader(patch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		cmd = exec.Command("patch", "-p1", "--forward")
+		cmd = guestCommand("patch", "-p1", "--forward")
 		cmd.Dir = r.Root
 		cmd.Stdin = strings.NewReader(patch)
 		out2, err2 := cmd.CombinedOutput()
@@ -213,11 +215,11 @@ func (r Repo) RunContext(ctx context.Context, command, workdir string, timeout t
 		}
 		dir = resolved
 	}
-	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd := guestCommand("/bin/sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"HOME=/root",
+		"HOME=/home/abox",
 		"LANG=C",
 		"TERM=dumb",
 		"TMPDIR=/tmp",
@@ -247,7 +249,7 @@ func (r Repo) InitBaseline() error {
 	if err := os.MkdirAll(r.Root, 0o755); err != nil {
 		return err
 	}
-	cmd := exec.Command("git", "init")
+	cmd := guestCommand("git", "init")
 	cmd.Dir = r.Root
 	cmd.Env = []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -259,18 +261,18 @@ func (r Repo) InitBaseline() error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git init: %w: %s", err, out)
 	}
-	cfg := exec.Command("git", "config", "user.email", "abox-guest@abox.local")
+	cfg := guestCommand("git", "config", "user.email", "abox-guest@abox.local")
 	cfg.Dir = r.Root
 	_ = cfg.Run()
-	cfg = exec.Command("git", "config", "user.name", "abox-guest")
+	cfg = guestCommand("git", "config", "user.name", "abox-guest")
 	cfg.Dir = r.Root
 	_ = cfg.Run()
-	add := exec.Command("git", "add", "-f", "-A")
+	add := guestCommand("git", "add", "-f", "-A")
 	add.Dir = r.Root
 	if out, err := add.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add baseline: %w: %s", err, out)
 	}
-	commit := exec.Command("git", "commit", "--allow-empty", "-m", "abox baseline")
+	commit := guestCommand("git", "commit", "--allow-empty", "-m", "abox baseline")
 	commit.Dir = r.Root
 	commit.Env = []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -286,16 +288,16 @@ func (r Repo) InitBaseline() error {
 }
 
 func (r Repo) ExportPatch() (string, string, error) {
-	cmd := exec.Command("git", "diff", "HEAD")
+	cmd := guestCommand("git", "diff", "HEAD")
 	cmd.Dir = r.Root
 	out, err := cmd.Output()
 	if err != nil {
 		return "", "", err
 	}
-	stat := exec.Command("git", "diff", "--stat", "HEAD")
+	stat := guestCommand("git", "diff", "--stat", "HEAD")
 	stat.Dir = r.Root
 	summary, _ := stat.Output()
-	untracked := exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	untracked := guestCommand("git", "ls-files", "--others", "--exclude-standard")
 	untracked.Dir = r.Root
 	extra, _ := untracked.Output()
 	if len(bytes.TrimSpace(extra)) > 0 {
@@ -309,6 +311,9 @@ func ExtractTar(r io.Reader, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
+	if err := setGuestOwnership(dest, false); err != nil {
+		return err
+	}
 	tr := tar.NewReader(r)
 	var files, bytesN int
 	for {
@@ -320,10 +325,10 @@ func ExtractTar(r io.Reader, dest string) error {
 			return err
 		}
 		files++
-		if files > 20000 {
+		if files > protocol.MaxArchiveFiles {
 			return fmt.Errorf("too many files")
 		}
-		if hdr.Size > 32<<20 {
+		if hdr.Size > protocol.MaxArchiveFile {
 			return fmt.Errorf("file too large")
 		}
 		name := filepath.Clean(hdr.Name)
@@ -343,8 +348,14 @@ func ExtractTar(r io.Reader, dest string) error {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
+			if err := setGuestOwnership(target, false); err != nil {
+				return err
+			}
 		case tar.TypeReg, tar.TypeRegA:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := setGuestParentOwnership(dest, target); err != nil {
 				return err
 			}
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode().Perm())
@@ -359,17 +370,48 @@ func ExtractTar(r io.Reader, dest string) error {
 			if n > hdr.Size {
 				return fmt.Errorf("file size mismatch")
 			}
+			if err := setGuestOwnership(target, false); err != nil {
+				return err
+			}
 			bytesN += int(n)
-			if bytesN > 256<<20 {
+			if bytesN > protocol.MaxArchiveBytes {
 				return fmt.Errorf("archive too large")
 			}
 		case tar.TypeSymlink:
 			if filepath.IsAbs(hdr.Linkname) || strings.Contains(filepath.Clean(hdr.Linkname), "..") {
 				return fmt.Errorf("unsafe symlink")
 			}
-			_ = os.Symlink(hdr.Linkname, target)
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := setGuestParentOwnership(dest, target); err != nil {
+				return err
+			}
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return err
+			}
+			if err := setGuestOwnership(target, true); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("unsupported tar type %v", hdr.Typeflag)
+		}
+	}
+}
+
+func guestCommand(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	configureGuestCommand(cmd)
+	return cmd
+}
+
+func setGuestParentOwnership(dest, target string) error {
+	for dir := filepath.Dir(target); ; dir = filepath.Dir(dir) {
+		if err := setGuestOwnership(dir, false); err != nil {
+			return err
+		}
+		if dir == dest {
+			return nil
 		}
 	}
 }
@@ -401,9 +443,11 @@ func runWithTimeout(cmd *exec.Cmd, d time.Duration) error {
 }
 
 func runWithContext(cmd *exec.Cmd, ctx context.Context, d time.Duration) error {
+	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	defer cleanupGuestCommand(cmd)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	timer := time.NewTimer(d)
@@ -412,12 +456,21 @@ func runWithContext(cmd *exec.Cmd, ctx context.Context, d time.Duration) error {
 	case err := <-done:
 		return err
 	case <-timer.C:
+		cleanupGuestCommand(cmd)
 		_ = cmd.Process.Kill()
-		<-done
+		waitGuestCommand(done)
 		return fmt.Errorf("timeout after %s", d)
 	case <-ctx.Done():
+		cleanupGuestCommand(cmd)
 		_ = cmd.Process.Kill()
-		<-done
+		waitGuestCommand(done)
 		return ctx.Err()
+	}
+}
+
+func waitGuestCommand(done <-chan error) {
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
 	}
 }

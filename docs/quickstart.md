@@ -13,10 +13,11 @@ permalink: /quickstart/
 
 ## Prerequisites
 
-- Apple Silicon Mac (`kern.hv_support` = 1)
 - Go 1.25+
-- Docker once, to pack the golden root filesystem (`make image`)
-- Homebrew libkrun + libkrunfw
+
+The currently runnable host path requires an Apple Silicon Mac with
+`kern.hv_support = 1`, Homebrew libkrun/libkrunfw, and Docker to pack the guest
+root filesystem. Docker is never on the session execution path.
 
 ```bash
 brew tap libkrun/krun
@@ -24,7 +25,14 @@ brew trust libkrun/krun
 brew install libkrun libkrunfw
 ```
 
-From a clone of ABox:
+The Linux host/build port is implemented for amd64 and arm64, and Linux image
+creation is rootless and Docker-free. Linux VMM execution, release support, and
+KVM isolation remain **Planned** until separate Phase 0.5/18 evidence passes on
+the pinned Arch and Fedora x86_64 baselines. WSL2 and containerized VMM
+execution are unsupported. See [Platforms]({{ '/platforms' | relative_url }})
+for package versions, build dependencies, and the exact boundary.
+
+For the currently runnable macOS setup, from a clone of ABox:
 
 ```bash
 make build
@@ -38,18 +46,21 @@ Put a provider key on the **host** (the guest never receives it). In the TUI:
 /provider
 ```
 
-That saves to the macOS keychain first, then `~/.abox/credentials.env` (mode
-`0600`) if the keychain is locked. Cloud stores (Vault, Azure Key Vault, AWS
-Secrets Manager) use [`/credential`]({{ '/credentials' | relative_url }}).
+That saves to the OS keystore first: macOS Keychain or Linux Secret Service.
+If it is locked, absent, or times out, ABox warns and saves to
+`~/.abox/credentials.env` (mode `0600`). Cloud stores (Vault, Azure Key Vault,
+AWS Secrets Manager) use [`/credential`]({{ '/credentials' | relative_url }}).
 
 You can also write `~/.abox/credentials.env` yourself with `XAI_API_KEY=…`
 (or OpenAI / Anthropic).
 
 ## First program
 
-One import: `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Work from any
-directory; the SDK snapshots exactly that directory into the guest without
-requiring or inspecting host Git.
+One import: `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Set `RepoPath` to any
+path inside a Git worktree. The SDK discovers the repository root and snapshots
+committed files plus any tracked modifications and non-ignored untracked files.
+Git-ignored files, `.git` metadata, the active ABox state directory, symlinks,
+and special files are excluded.
 
 ```bash
 go get github.com/AdminTurnedDevOps/ABox@latest
@@ -123,4 +134,5 @@ MCP login.
 
 - [Concepts]({{ '/concepts' | relative_url }}) — host brokers, secretless config
 - [Examples]({{ '/examples' | relative_url }}) — resume, cancel, probe, approvals, …
-- [Troubleshooting]({{ '/troubleshooting' | relative_url }}) — missing image, old guest, codesign
+- [Platforms]({{ '/platforms' | relative_url }}) — host support, Linux builds, images
+- [Troubleshooting]({{ '/troubleshooting' | relative_url }}) — images, loaders, KVM, codesign

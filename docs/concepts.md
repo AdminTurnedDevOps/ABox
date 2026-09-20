@@ -16,7 +16,7 @@ permalink: /concepts/
 | | Host (your process) | Guest (`abox-guest`) |
 | --- | --- | --- |
 | Runs | `pkg/abox` or `abox`, `abox-vmm`, LLM broker, MCP broker | Agent loop, five tools |
-| Sees | Session dir on the Mac, `config.yaml`, credentials | `/work/repo` inside the VM |
+| Sees | Session dir on the host, `config.yaml`, credentials | `/work/repo` inside the VM |
 | HTTPS | Provider and MCP Streamable HTTP | None. No guest NIC, no TSI inet |
 | Must not | Execute model-authored commands itself | Import `internal/tui`, `internal/provider`, or `cmd/abox` |
 
@@ -25,20 +25,22 @@ vsock and renders `agent_event` frames. When the guest needs a model or an
 MCP tool, it names a configured alias; the host broker dials the network.
 
 {: .important }
-Isolation claims stay **Planned**. The device plan is vsock-only (`krun_add_vsock`
-with flags 0), no guest NIC, no host-path virtio-fs. That is an intended
-allowlist, not a passed hardware suite.
+Isolation claims stay **Planned**. The device plan is vsock-only
+(`krun_add_vsock` with flags 0), no guest NIC, no host-path virtio-fs. That is
+an intended allowlist, not a passed hardware suite. Linux/KVM needs independent
+Phase 0.5 and Phase 18 evidence on both pinned distributions; macOS evidence
+does not cover it.
 
 ## Kernel vs disk
 
 The `.raw` file is **only a disk**: ext4 userspace (Alpine, `git`, `patch`,
 `abox-guest`). No kernel, no bootloader.
 
-The guest kernel is **libkrunfw** (Homebrew). `abox-vmm` attaches host files
-as virtio-blk:
+The guest kernel is **libkrunfw** (Homebrew on macOS or the pinned distro
+package on Linux). `abox-vmm` attaches host files as virtio-blk:
 
 ```text
-host:  ~/.abox/sessions/<id>/root.raw      Mac file (ext4)
+host:  ~/.abox/sessions/<id>/root.raw      host file (ext4)
          ↓ libkrun virtio-blk
 guest: /dev/vda  →  /                      Alpine + abox-guest + /work/repo
 
@@ -50,13 +52,18 @@ guest: /dev/vdb                            session id + model alias
 
 ## Three files
 
-1. **Golden image** — `~/.abox/images/abox-guest.raw`. Packed once (`make image`). Template. Not attached to a running VM.
+1. **Golden image** — `~/.abox/images/abox-guest-linux-<arch>.raw`. Packed once (`make image`). Template plus adjacent manifest. Not attached to a running VM.
 2. **Session disk** — `~/.abox/sessions/<id>/root.raw`. Clone of (1). This is `/dev/vda`. Destroy the session dir and this disk is gone; the golden stays.
 3. **Config disk** — `sessions/<id>/config.raw`. ~1 MiB, read-only `/dev/vdb`. Not cloned from the golden image. Model profile only; credentials stay on the host.
 
 `Open` copies (1)→(2) and writes (3). `Resume` boots the existing (2) and
 rewrites (3) without secrets. Startup also scrubs leftover plaintext keys
 out of old `config.raw` / `guest-config.json` files.
+
+The image manifest records schema, architecture, image ID, protocol, and
+SHA-256. `Open` rejects an architecture/protocol mismatch or changed image.
+Linux also rejects metadata-free legacy images and sessions rather than
+guessing their architecture.
 
 A guest that still finds `secrets` or `mcp_servers` in that config refuses
 to boot. Rebuild the image and start a new session.
@@ -114,13 +121,11 @@ not model tool calls, and do not go through that gate.
 
 ## Source snapshot
 
-`Open` snapshots exactly the configured source directory into the guest. It
-does not discover a Git root, inspect branches or `HEAD`, or require Git on the
-host. `.git` files and directories are excluded, and symlinks and special files
-are rejected. The guest creates its own private Git baseline after transfer so
-patch export remains available. `Resume(id)` boots the existing disk and does
-not recopy the host source directory.
-
-Git ignore rules do not control this snapshot. All regular files and dotfiles
-other than `.git` metadata are included, so the selected source directory must
-contain only files the guest is allowed to read.
+`Open` discovers the enclosing Git worktree and snapshots its repository root.
+A clean worktree archives committed `HEAD`. A dirty or commitless worktree is
+copied into a private host-side repository using tracked files and non-ignored
+untracked files, then archived from a private commit. This preserves local
+changes without modifying host Git while omitting ignored caches, build output,
+and local secrets. `.git` metadata and the active ABox state directory are not
+copied; symlinks and special files are rejected. `Resume(id)` boots the existing
+disk and does not recopy the host repository.

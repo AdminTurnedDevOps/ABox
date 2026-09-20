@@ -1,8 +1,10 @@
 package mcpauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
 	"github.com/AdminTurnedDevOps/ABox/internal/credentials"
@@ -232,11 +235,10 @@ func TestLoginNamedPersistsNoRefreshToken(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("ABOX_HOME", "")
-	// Never touch the real macOS keychain from tests: force the file-store
-	// fallback path of the keychain-preferred writer.
-	origKC := credsource.KeychainEnabled
-	credsource.KeychainEnabled = func() bool { return false }
-	t.Cleanup(func() { credsource.KeychainEnabled = origKC })
+	// Never touch the real OS keystore from tests: force the file-store fallback.
+	origKS := credsource.KeystoreEnabled
+	credsource.KeystoreEnabled = func(context.Context) bool { return false }
+	t.Cleanup(func() { credsource.KeystoreEnabled = origKS })
 
 	cfg := config.Defaults()
 	cfg.MCPServers = []config.MCPServer{{
@@ -269,7 +271,7 @@ func TestLoginNamedPersistsNoRefreshToken(t *testing.T) {
 	}
 }
 
-func TestLoginNamedPersistsKeychainReference(t *testing.T) {
+func TestLoginNamedPersistsKeystoreReference(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("ABOX_HOME", "")
@@ -279,7 +281,7 @@ func TestLoginNamedPersistsKeychainReference(t *testing.T) {
 		if name != "CUSTOM_MCP_TOKEN" || value != "pat-value" {
 			t.Fatalf("save %q=%q", name, value)
 		}
-		return credsource.SaveResult{Source: "keychain", Keychain: true, Note: "keychain"}, nil
+		return credsource.SaveResult{Source: "keystore", Keystore: true, Note: "keystore"}, nil
 	}
 	t.Cleanup(func() { savePreferred = origSave })
 
@@ -297,7 +299,100 @@ func TestLoginNamedPersistsKeychainReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := savedCfg.MCPServers[0]
-	if server.CredentialEnv != "" || server.Credential == nil || *server.Credential != (config.CredentialRef{Source: "keychain", Name: "CUSTOM_MCP_TOKEN"}) {
+	if server.CredentialEnv != "" || server.Credential == nil || *server.Credential != (config.CredentialRef{Source: "keystore", Name: "CUSTOM_MCP_TOKEN"}) {
 		t.Fatalf("saved server %#v", server)
+	}
+}
+
+func TestPersistCredentialReferenceCanonicalizesAliases(t *testing.T) {
+	for _, source := range []string{"keystore", "keychain", "secretservice"} {
+		t.Run(source, func(t *testing.T) {
+			t.Setenv("ABOX_HOME", t.TempDir())
+			cfg := config.Defaults()
+			cfg.MCPServers = []config.MCPServer{{Name: "gh", URL: "https://mcp.example/api"}}
+			if err := persistCredentialReference(cfg, "gh", "MCP_TOKEN", source); err != nil {
+				t.Fatal(err)
+			}
+			saved, _, err := config.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := saved.MCPServers[0].CredentialReference().Source; got != "keystore" {
+				t.Fatalf("source %q", got)
+			}
+		})
+	}
+}
+
+func TestBrowserLauncherByPlatform(t *testing.T) {
+	if got := browserLauncher("darwin"); got != "open" {
+		t.Fatalf("darwin launcher %q", got)
+	}
+	if got := browserLauncher("linux"); got != "xdg-open" {
+		t.Fatalf("linux launcher %q", got)
+	}
+	if got := browserLauncher("windows"); got != "" {
+		t.Fatalf("unsupported launcher %q", got)
+	}
+}
+
+func TestOpenBrowserLaunchFailurePrintsManualURL(t *testing.T) {
+	origLookPath := browserLookPath
+	origRun := runBrowserCommand
+	origStderr := oauthStderr
+	var output bytes.Buffer
+	browserLookPath = func(name string) (string, error) {
+		if name != "xdg-open" {
+			t.Fatalf("launcher %q", name)
+		}
+		return "/fake/xdg-open", nil
+	}
+	runBrowserCommand = func(_ context.Context, path string, args ...string) error {
+		if path != "/fake/xdg-open" || len(args) != 1 || args[0] != "https://auth.example/authorize" {
+			t.Fatalf("command %q %v", path, args)
+		}
+		return errors.New("no display")
+	}
+	oauthStderr = &output
+	t.Cleanup(func() {
+		browserLookPath = origLookPath
+		runBrowserCommand = origRun
+		oauthStderr = origStderr
+	})
+
+	if err := openBrowserForPlatform(context.Background(), "linux", "https://auth.example/authorize"); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "no display") || !strings.Contains(got, "https://auth.example/authorize") {
+		t.Fatalf("manual flow output %q", got)
+	}
+}
+
+func TestOpenBrowserMissingLauncherPrintsManualURL(t *testing.T) {
+	origLookPath := browserLookPath
+	origStderr := oauthStderr
+	var output bytes.Buffer
+	browserLookPath = func(string) (string, error) { return "", errors.New("missing") }
+	oauthStderr = &output
+	t.Cleanup(func() {
+		browserLookPath = origLookPath
+		oauthStderr = origStderr
+	})
+
+	if err := openBrowserForPlatform(context.Background(), "linux", "https://auth.example/manual"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "https://auth.example/manual") {
+		t.Fatalf("manual URL missing: %q", output.String())
+	}
+}
+
+func TestOAuthCallbackTimeout(t *testing.T) {
+	origWait := oauthCallbackWait
+	oauthCallbackWait = time.Millisecond
+	t.Cleanup(func() { oauthCallbackWait = origWait })
+	_, err := waitForOAuthCallback(context.Background(), make(chan string), make(chan error))
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("got %v", err)
 	}
 }

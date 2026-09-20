@@ -1,14 +1,20 @@
 #!/bin/sh
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IMG="${ABOX_IMAGE:-$HOME/.abox/images/abox-guest.raw}"
-BIN="${ROOT}/bin/abox-guest-linux-arm64"
-WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
-cp "$BIN" "$WORKDIR/abox-guest"
-docker run --rm --privileged \
-  -v "$WORKDIR:/in:ro" \
-  -v "$(dirname "$IMG"):/out" \
-  alpine:3.21 \
-  sh -c 'apk add --no-cache e2fsprogs >/dev/null && mkdir -p /mnt && mount -o loop /out/abox-guest.raw /mnt && cp /in/abox-guest /mnt/usr/local/bin/abox-guest && chmod 0755 /mnt/usr/local/bin/abox-guest && umount /mnt'
-echo "updated $IMG"
+
+case "${ABOX_HOST_OS:-$(uname -s)}" in
+  Linux)
+    # Rebuild instead of mutating a selected filesystem with debugfs. The native
+    # builder publishes a complete immutable image+manifest generation.
+    exec sh "$ROOT/images/build-guest-linux.sh"
+    ;;
+  Darwin)
+    # Preserve the existing Docker-based macOS update workflow by rebuilding the
+    # image with its Docker packer rather than introducing a second mutation path.
+    exec sh "$ROOT/images/build-guest-darwin.sh"
+    ;;
+  *)
+    echo "guest image updates are supported on Linux and macOS" >&2
+    exit 1
+    ;;
+esac

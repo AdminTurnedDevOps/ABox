@@ -3,9 +3,19 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestGuestImagePathIncludesArchitecture(t *testing.T) {
+	t.Setenv("ABOX_HOME", t.TempDir())
+	got := GuestImagePath()
+	want := filepath.Join(ImageDir(), "abox-guest-linux-"+runtime.GOARCH+".raw")
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
 
 func TestModelGuestRoundTrip(t *testing.T) {
 	orig := Model{Name: "grok-default", Provider: "xai", Model: "grok-4", CredentialEnv: "XAI_API_KEY", BaseURL: "https://api.x.ai/v1"}
@@ -64,6 +74,10 @@ func TestModelCredentialReference(t *testing.T) {
 	if got := (Model{Credential: &explicit}).CredentialReference(); got != explicit {
 		t.Fatalf("explicit: %+v", got)
 	}
+	alias := CredentialRef{Source: "keychain", Name: "X"}
+	if got := (Model{Credential: &alias}).CredentialReference(); got.Source != "keystore" {
+		t.Fatalf("alias not canonicalized: %+v", got)
+	}
 }
 
 func TestMCPServerCredentialReference(t *testing.T) {
@@ -117,7 +131,7 @@ func TestModelBaseURLRequiresHTTPS(t *testing.T) {
 func TestValidateFieldVersionRules(t *testing.T) {
 	c := Defaults()
 	c.Models[0].CredentialEnv = ""
-	c.Models[0].Credential = &CredentialRef{Source: "keychain", Name: "K", Field: "f"}
+	c.Models[0].Credential = &CredentialRef{Source: "keystore", Name: "K", Field: "f"}
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "field is not supported") {
 		t.Fatalf("got %v", err)
 	}
@@ -191,11 +205,11 @@ func TestValidateRejectsCredentialDestinationCollisions(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsUnsafeKeychainAccount(t *testing.T) {
+func TestValidateRejectsUnsafeKeystoreAccount(t *testing.T) {
 	c := Defaults()
 	c.Models[0].CredentialEnv = ""
 	c.Models[0].Credential = &CredentialRef{Source: "keychain", Name: "safe-name; delete"}
-	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "invalid keychain credential name") {
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "invalid keystore credential name") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -209,7 +223,7 @@ func TestCredentialYAMLRoundTrip(t *testing.T) {
 	c.Models[0].Credential = &CredentialRef{Source: "vault", Name: "secret/abox/grok", Field: "api_key", Version: "4"}
 	c.MCPServers = []MCPServer{{
 		Name: "gh", URL: "https://api.githubcopilot.com/mcp/",
-		Credential: &CredentialRef{Source: "keychain", Name: "ABOX_MCP_GH_TOKEN"},
+		Credential: &CredentialRef{Source: "keystore", Name: "ABOX_MCP_GH_TOKEN"},
 	}}
 	if err := c.Save(); err != nil {
 		t.Fatal(err)
@@ -222,8 +236,58 @@ func TestCredentialYAMLRoundTrip(t *testing.T) {
 	if got.Models[0].Credential == nil || *got.Models[0].Credential != *want {
 		t.Fatalf("model credential: %+v", got.Models[0].Credential)
 	}
-	if got.MCPServers[0].Credential == nil || got.MCPServers[0].Credential.Source != "keychain" {
+	if got.MCPServers[0].Credential == nil || got.MCPServers[0].Credential.Source != "keystore" {
 		t.Fatalf("mcp credential: %+v", got.MCPServers[0].Credential)
+	}
+}
+
+func TestCredentialSourceAliasesLoadAndSaveCanonical(t *testing.T) {
+	for _, source := range []string{"keystore", "keychain", "secretservice"} {
+		t.Run(source, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("ABOX_HOME", home)
+			body := "models:\n  - name: custom\n    provider: other\n    model: model\n    credential:\n      source: " + source + "\n      name: SAFE_NAME\nconnectivity: {}\nruntime: {}\nresources: {}\n"
+			if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Models[0].Credential.Source; got != "keystore" {
+				t.Fatalf("loaded source %q", got)
+			}
+			if err := cfg.Save(); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := os.ReadFile(Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(saved), "source: keystore") || strings.Contains(string(saved), "source: keychain") || strings.Contains(string(saved), "source: secretservice") {
+				t.Fatalf("non-canonical config:\n%s", saved)
+			}
+		})
+	}
+}
+
+func TestSaveCanonicalizesAliasesWithoutMutatingCaller(t *testing.T) {
+	t.Setenv("ABOX_HOME", t.TempDir())
+	cfg := Defaults()
+	cfg.Models[0].CredentialEnv = ""
+	cfg.Models[0].Credential = &CredentialRef{Source: "secretservice", Name: "XAI_API_KEY"}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Models[0].Credential.Source != "secretservice" {
+		t.Fatalf("Save mutated caller: %+v", cfg.Models[0].Credential)
+	}
+	body, err := os.ReadFile(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "source: keystore") {
+		t.Fatalf("canonical source missing:\n%s", body)
 	}
 }
 

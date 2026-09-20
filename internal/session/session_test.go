@@ -126,3 +126,56 @@ func TestLoadRejectsInvalidSessionID(t *testing.T) {
 		}
 	}
 }
+
+func TestCompatibilityMetadataRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, err := Create("/source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ManifestSchema = 1
+	s.GuestArch = "amd64"
+	s.ImageID = "image-id"
+	s.ImageSHA256 = strings.Repeat("a", 64)
+	s.GuestProtocol = 4
+	s.VMMBackend = "kvm"
+	s.RepoRoot = "/source"
+	s.HEAD = strings.Repeat("b", 40)
+	if err := os.WriteFile(s.RootDisk(), []byte("disk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteMeta(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ManifestSchema != 1 || got.GuestArch != "amd64" || got.ImageID != "image-id" || got.ImageSHA256 != s.ImageSHA256 || got.GuestProtocol != 4 || got.VMMBackend != "kvm" || got.RepoRoot != "/source" || got.HEAD != s.HEAD {
+		t.Fatalf("metadata = %#v", got)
+	}
+}
+
+func TestRuntimeLockRejectsConcurrentSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, err := Create("/source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := *s
+	if acquired, err := s.AcquireRuntimeLock(); err != nil || !acquired {
+		t.Fatalf("first lock: acquired=%v err=%v", acquired, err)
+	}
+	if _, err := other.AcquireRuntimeLock(); err == nil || !strings.Contains(err.Error(), "already active") {
+		t.Fatalf("second lock: %v", err)
+	}
+	if err := s.ReleaseRuntimeLock(); err != nil {
+		t.Fatal(err)
+	}
+	if acquired, err := other.AcquireRuntimeLock(); err != nil || !acquired {
+		t.Fatalf("lock after release: acquired=%v err=%v", acquired, err)
+	}
+	if err := other.ReleaseRuntimeLock(); err != nil {
+		t.Fatal(err)
+	}
+}

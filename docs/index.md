@@ -39,9 +39,10 @@ _, err = sess.Turn(ctx, "What does this repo do?", func(ev abox.Event) {
 ```
 
 {: .important }
-Isolation claims stay **Planned** until the hardware suite in `PLAN.md` passes.
-The SDK boots the same microVM as the CLI. A current guest speaks **protocol 4**.
-`Open` / `Resume` reject older disks.
+Isolation claims stay **Planned** until the platform-specific Phase 0.5 and
+Phase 18 hardware suites in `PLAN.md` pass. The SDK boots the same microVM as
+the CLI. A current guest speaks **protocol 4**. `Open` / `Resume` reject older
+disks.
 
 ## What the SDK does
 
@@ -59,8 +60,10 @@ The SDK boots the same microVM as the CLI. A current guest speaks **protocol 4**
 
 - No host-side tool loop. Tools execute in the guest only.
 - No `write_file`. Edits go through `apply_patch`.
-- No Docker on the session path. Docker (today) only packs the golden `.raw`.
-- No Linux/Windows VMM yet. Apple Silicon + libkrun.
+- No Docker on the session path. macOS uses Docker only to pack the golden
+  `.raw`; Linux has a rootless native image builder.
+- The Linux/KVM host path is implemented but runtime/release support remains
+  Planned pending the pinned Arch/Fedora hardware gate. Windows is unsupported.
 - No guest NIC and no TSI inet. LLM and MCP HTTPS are host-brokered.
 - No MCP tool approval yet. Only `run_command` prompts.
 
@@ -72,7 +75,7 @@ your process  (pkg/abox or abox)
   → host MCP broker     (Streamable HTTP; tokens stay here)
   → abox-vmm
       → libkrun + libkrunfw   ← Linux kernel (not on the disk)
-      → Hypervisor.framework
+      → Hypervisor.framework (macOS) / KVM (Linux, Planned support)
       → vsock only (krun_add_vsock flags 0)
   guest: /dev/vda = session root.raw (ext4 userspace)
          /dev/vdb = config.raw (session id + model alias; no secrets)
@@ -82,7 +85,8 @@ your process  (pkg/abox or abox)
 ## Next
 
 1. [Quickstart]({{ '/quickstart' | relative_url }}) — install, key, first turn
-2. [Concepts]({{ '/concepts' | relative_url }}) — host vs guest, protocol 4
-3. [CLI and TUI]({{ '/cli' | relative_url }}) — `abox`, slash commands, keys
-4. [API]({{ '/api' | relative_url }}) — `Open`, `Turn`, `SetApprover`, …
-5. [Troubleshooting]({{ '/troubleshooting' | relative_url }})
+2. [Platforms]({{ '/platforms' | relative_url }}) — build baselines and support gates
+3. [Concepts]({{ '/concepts' | relative_url }}) — host vs guest, protocol 4
+4. [CLI and TUI]({{ '/cli' | relative_url }}) — `abox`, slash commands, keys
+5. [API]({{ '/api' | relative_url }}) — `Open`, `Turn`, `SetApprover`, …
+6. [Troubleshooting]({{ '/troubleshooting' | relative_url }})

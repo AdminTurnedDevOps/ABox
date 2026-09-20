@@ -14,21 +14,141 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  macos:
+    name: macOS unit and guest build
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
+      - run: make test
+      - run: CGO_ENABLED=0 go test ./cmd/...
+      - run: CGO_ENABLED=0 go vet ./...
+      - run: go build -o /tmp/abox ./cmd/abox
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags abox_guest -o /tmp/abox-guest ./cmd/abox-guest
 
-      - name: Test
-        run: make test
+  ubuntu-build-only:
+    name: Ubuntu cgo-disabled unit/vet (no KVM evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Unit tests and vet without cgo
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          make test
+          go test ./...
+          go vet ./...
+          go build -o /tmp/abox ./cmd/abox
+          go build -o /tmp/abox-vmm-stub ./cmd/abox-vmm
+      - name: Cross-build both guest architectures
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -tags abox_guest \
+              -o "/tmp/abox-guest-linux-$arch" ./cmd/abox-guest
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -o "/tmp/abox-vmm-linux-$arch-stub" ./cmd/abox-vmm
+          done
+      - name: Validate workflows
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          actionlint -shellcheck= -config-file .github/actionlint.yaml
+      - name: Record build-only scope
+        run: |
+          echo '### Ubuntu build-only result' >> "$GITHUB_STEP_SUMMARY"
+          echo 'This job has no KVM/libkrun and is not Linux runtime or isolation evidence.' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build abox
-        run: go build -o /tmp/abox ./cmd/abox
+  arch-build-only:
+    name: Arch 2026-09-17 cgo/image build (no KVM evidence)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel@sha256:4894f5a268c696fad671966f383175a13faf433c9d9c88cdd4e32eaa2d18838b
+    steps:
+      - name: Install pinned Arch snapshot dependencies
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'Server = https://archive.archlinux.org/repos/2026/09/17/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+          pacman -Syyu --noconfirm
+          pacman -S --needed --noconfirm git curl ca-certificates pkgconf \
+            fakeroot e2fsprogs \
+            zstd python shadow util-linux binutils file
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install checksum/signature-pinned libkrun pair
+        run: sh scripts/install-arch-libkrun.sh
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run real pkg-config/cgo compatibility checks
+        env:
+          GOFLAGS: -buildvcs=false
+        run: |
+          set -euo pipefail
+          sh scripts/check-libkrun.sh 1.19.4 libkrunfw.so.5
+          CGO_ENABLED=1 go test ./...
+          CGO_ENABLED=0 go test -tags abox_guest -run TestGuestCommand ./internal/guest/tools
+          CGO_ENABLED=1 make vmm
+          ldd bin/abox-vmm | grep -Eq 'libkrun\.so\.1[[:space:]]+=>'
+          CGO_ENABLED=0 go build -o /tmp/abox-vmm-stub ./cmd/abox-vmm
+      - name: Run rootless image builder
+        run: |
+          set -euo pipefail
+          useradd --create-home --shell /bin/bash abox-ci
+          chown -R abox-ci:abox-ci "$GITHUB_WORKSPACE"
+          runuser -u abox-ci -- env HOME=/home/abox-ci GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            sh -c 'cd "$GITHUB_WORKSPACE" && sh scripts/test-rootless-image-build.sh amd64'
+      - name: Record build-only scope
+        run: |
+          echo '### Arch build-only result' >> "$GITHUB_STEP_SUMMARY"
+          echo 'This unprivileged container has no KVM and is not runtime or isolation evidence.' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build guest
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/abox-guest ./cmd/abox-guest
+  fedora-build-only:
+    name: Fedora 44 cgo/image build (no KVM evidence)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
+    steps:
+      - name: Install exact Fedora 44 dependencies
+        run: |
+          set -euo pipefail
+          dnf -y --releasever=44 install git curl ca-certificates gcc gcc-c++ make \
+            pkgconf-pkg-config \
+            fakeroot e2fsprogs zstd python3 shadow-utils util-linux binutils file \
+            tar gzip findutils diffutils
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install checksum-pinned libkrun pair
+        run: sh scripts/install-fedora-libkrun.sh
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run real pkg-config/cgo compatibility checks
+        env:
+          GOFLAGS: -buildvcs=false
+        run: |
+          set -euo pipefail
+          sh scripts/check-libkrun.sh 1.19.0 libkrunfw.so.5
+          CGO_ENABLED=1 go test ./...
+          CGO_ENABLED=0 go test -tags abox_guest -run TestGuestCommand ./internal/guest/tools
+          CGO_ENABLED=1 make vmm
+          ldd bin/abox-vmm | grep -Eq 'libkrun\.so\.1[[:space:]]+=>'
+          CGO_ENABLED=0 go build -o /tmp/abox-vmm-stub ./cmd/abox-vmm
+      - name: Run rootless image builder
+        run: |
+          set -euo pipefail
+          useradd --create-home --shell /bin/bash abox-ci
+          chown -R abox-ci:abox-ci "$GITHUB_WORKSPACE"
+          runuser -u abox-ci -- env HOME=/home/abox-ci GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            sh -c 'cd "$GITHUB_WORKSPACE" && sh scripts/test-rootless-image-build.sh amd64'
+      - name: Record build-only scope
+        run: |
+          echo '### Fedora build-only result' >> "$GITHUB_STEP_SUMMARY"
+          echo 'This unprivileged container has no KVM and is not runtime or isolation evidence.' >> "$GITHUB_STEP_SUMMARY"

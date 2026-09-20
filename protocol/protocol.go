@@ -14,6 +14,9 @@ const (
 
 	MaxFrameBytes   = 1 << 20
 	MaxArchiveChunk = 256 << 10
+	MaxArchiveFiles = 20000
+	MaxArchiveFile  = 256 << 20
+	MaxArchiveBytes = 256 << 20
 	MaxHistoryBytes = 256 << 10
 	RPCPort         = 1024
 	GuestRepoDir    = "/work/repo"

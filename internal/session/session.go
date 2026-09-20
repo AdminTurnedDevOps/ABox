@@ -14,11 +14,24 @@ import (
 )
 
 type Session struct {
-	ID         string    `json:"id"`
-	Capability string    `json:"capability"`
-	Created    time.Time `json:"created"`
-	SourceDir  string    `json:"source_dir,omitempty"`
-	Dir        string    `json:"dir"`
+	ID               string    `json:"id"`
+	Capability       string    `json:"capability"`
+	Created          time.Time `json:"created"`
+	SourceDir        string    `json:"source_dir,omitempty"`
+	RepoRoot         string    `json:"repo_root,omitempty"`
+	HEAD             string    `json:"head,omitempty"`
+	Dir              string    `json:"dir"`
+	ManifestSchema   int       `json:"manifest_schema,omitempty"`
+	GuestArch        string    `json:"guest_arch,omitempty"`
+	ImageID          string    `json:"image_id,omitempty"`
+	ImageSHA256      string    `json:"image_sha256,omitempty"`
+	GuestProtocol    int       `json:"guest_protocol,omitempty"`
+	VMMBackend       string    `json:"vmm_backend,omitempty"`
+	HelperPID        int       `json:"helper_pid,omitempty"`
+	HelperStartID    string    `json:"helper_start_id,omitempty"`
+	HelperExecutable string    `json:"helper_executable,omitempty"`
+	DiagnosticProbe  bool      `json:"-"`
+	runtimeLock      *os.File
 }
 
 func Create(sourceDir string) (*Session, error) {
@@ -76,7 +89,16 @@ func (s *Session) WriteMeta() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.Dir, "session.json"), data, 0o600)
+	path := filepath.Join(s.Dir, "session.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func (s *Session) RPCSocket() string  { return filepath.Join(s.Dir, "rpc.sock") }

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -23,7 +25,12 @@ const (
 )
 
 var runAz = func(ctx context.Context, args []string) (stdout string, err error) {
-	cmd := exec.CommandContext(ctx, "az", args...)
+	path, err := trustedAzureCLI()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = azureCLIEnvironment()
 	out, err := cmd.Output()
 	return string(out), err
 }
@@ -33,8 +40,39 @@ var newAzureClient = func() *http.Client {
 }
 
 var azAvailable = func() bool {
-	_, err := exec.LookPath("az")
+	_, err := trustedAzureCLI()
 	return err == nil
+}
+
+func trustedAzureCLI() (string, error) {
+	candidates := []string{"/usr/bin/az", "/usr/local/bin/az"}
+	if runtime.GOOS == "darwin" {
+		candidates = []string{"/opt/homebrew/bin/az", "/usr/local/bin/az"}
+	}
+	for _, candidate := range candidates {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(resolved)
+		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("Azure CLI not found in a trusted system location")
+}
+
+func azureCLIEnvironment() []string {
+	env := []string{"PATH=/usr/bin:/bin"}
+	for _, name := range []string{
+		"HOME", "AZURE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+		"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "LANG", "LC_ALL",
+	} {
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
 }
 
 func (azureSource) Resolve(ctx context.Context, ref Reference) (Value, error) {

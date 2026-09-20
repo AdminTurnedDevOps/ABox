@@ -26,6 +26,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var imageID = "abox-guest-dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "abox-guest: %v\n", err)
@@ -34,6 +36,9 @@ func main() {
 }
 
 func run() error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("guest supervisor must run as root so tool subprocesses can drop privileges")
+	}
 	prepMounts()
 	cfg, err := loadConfig()
 	if err != nil {
@@ -42,6 +47,9 @@ func run() error {
 	repo := tools.Repo{Root: cfg.RepoDir}
 	if err := os.MkdirAll(repo.Root, 0o755); err != nil {
 		return err
+	}
+	if err := os.Chown(repo.Root, 1000, 1000); err != nil {
+		return fmt.Errorf("set guest repository ownership: %w", err)
 	}
 	if len(cfg.Secrets) > 0 || len(cfg.MCPServers) > 0 {
 		return fmt.Errorf("legacy guest config contains credentials or MCP endpoints; rebuild the session")
@@ -68,7 +76,7 @@ func run() error {
 	hello, _ := protocol.EncodeParams(protocol.HelloParams{
 		SessionID:  cfg.SessionID,
 		Capability: cfg.Capability,
-		ImageID:    "abox-guest-dev",
+		ImageID:    imageID,
 		Protocol:   protocol.Version,
 		GuestReady: true,
 		History:    loop.History(),

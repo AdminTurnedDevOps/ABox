@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,21 +29,29 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), terminationSignals()...)
+	go func() {
+		<-ctx.Done()
+		// Restore default handling so a second termination signal forces exit.
+		stop()
+	}()
+	err := run(ctx)
+	stop()
+	if err != nil && !(ctx.Err() != nil && errors.Is(err, context.Canceled)) {
 		fmt.Fprintf(os.Stderr, "abox: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(ctx context.Context) error {
 	if err := scrubLegacySessions(); err != nil {
 		return err
 	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
-		return runMCP(os.Args[2:])
+		return runMCP(ctx, os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] == "creds" {
-		return runCreds(os.Args[2:])
+		return runCreds(ctx, os.Args[2:])
 	}
 	fs := flag.NewFlagSet("abox", flag.ContinueOnError)
 	execFlag := fs.Bool("exec", false, "headless driver")
@@ -85,6 +94,9 @@ func run() error {
 	var sess *session.Session
 	var archive []byte
 	resuming := strings.TrimSpace(*resumeID) != ""
+	if resuming && *probeVM {
+		return fmt.Errorf("--probe-vm cannot resume a real session")
+	}
 	if resuming {
 		loaded, err := session.Load(strings.TrimSpace(*resumeID))
 		if err != nil {
@@ -97,18 +109,34 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		sourceDir, data, err := repository.ArchiveDirectory(wd)
+		created, err := session.Create(wd)
 		if err != nil {
 			return err
 		}
-		archive = data
-		created, err := session.Create(sourceDir)
+		snap, err := repository.OpenForSessionExcluding(wd, filepath.Join(created.Dir, "host-tree"), config.Dir())
 		if err != nil {
+			_ = os.RemoveAll(created.Dir)
+			return err
+		}
+		archive, err = repository.ArchiveHEAD(snap.Root)
+		if err != nil {
+			_ = os.RemoveAll(created.Dir)
+			return err
+		}
+		created.SourceDir = snap.HostSource
+		created.RepoRoot = snap.HostSource
+		created.HEAD = snap.HEAD
+		if err := created.WriteMeta(); err != nil {
+			_ = os.RemoveAll(created.Dir)
 			return err
 		}
 		sess = created
+		if snap.Ephemeral {
+			fmt.Fprintln(os.Stderr, "abox: worktree has local changes; using a private Git snapshot")
+		}
 		fmt.Fprintf(os.Stderr, "abox: created session %s\n", sess.ID)
 	}
+	defer sess.ReleaseRuntimeLock()
 
 	var sb *runtime.Sandbox
 	var broker *hostbroker.Broker
@@ -117,17 +145,32 @@ func run() error {
 	if image == "" {
 		image = config.GuestImagePath()
 	}
-	if err := runtime.Prepare(sess, image, sel, resuming); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var prepareErr error
+	if *probeVM {
+		prepareErr = runtime.PrepareProbe(sess, image, sel)
+	} else {
+		prepareErr = runtime.Prepare(sess, image, sel, resuming)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if prepareErr != nil {
 		if execMode {
-			return err
+			return prepareErr
 		}
-		fmt.Fprintf(os.Stderr, "abox: vm prepare: %v\n", err)
+		fmt.Fprintf(os.Stderr, "abox: vm prepare: %v\n", prepareErr)
 		vmState = "unavailable"
 	} else {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cancel()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		bootCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		vcpu, ram := cfg.Resources.Resolved()
-		started, err := runtime.Start(ctx, sess, cfg.Runtime.VMMPath, vcpu, ram)
+		started, err := runtime.Start(bootCtx, sess, cfg.Runtime.VMMPath, vcpu, ram)
+		cancel()
 		if err != nil {
 			if execMode && *prompt != "" {
 				return fmt.Errorf("start vm: %w", err)
@@ -152,20 +195,34 @@ func run() error {
 			sb = started
 			vmState = "ready"
 			defer sb.Stop()
+			if *probeVM {
+				if err := sb.TransferArchive(ctx, archive); err != nil {
+					return fmt.Errorf("source transfer: %w", err)
+				}
+				var res protocol.ListFilesResult
+				if err := sb.Call(ctx, "list_files", protocol.ListFilesParams{Path: ".", Depth: 4, Limit: 50}, &res); err != nil {
+					return fmt.Errorf("guest list_files: %w", err)
+				}
+				fmt.Println("guest ready; files:")
+				for _, p := range res.Paths {
+					fmt.Println(p)
+				}
+				return nil
+			}
 			broker, err = brokerForMode(cfg, sel, resolver, execMode)
 			if err != nil {
 				return err
 			}
 			defer broker.Close()
 			sb.SetGuestCallHandler(broker)
-			if err := pushSecrets(sb, cfg, resolver, sel); err != nil {
+			if err := pushSecrets(ctx, sb, cfg, resolver, sel); err != nil {
 				if execMode {
 					return err
 				}
 				fmt.Fprintf(os.Stderr, "abox: %v\n", err)
 			}
 			if !resuming {
-				if err := sb.TransferArchive(context.Background(), archive); err != nil {
+				if err := sb.TransferArchive(ctx, archive); err != nil {
 					return fmt.Errorf("source transfer: %w", err)
 				}
 			}
@@ -173,30 +230,19 @@ func run() error {
 	}
 
 	if *probeVM {
-		if sb == nil {
-			return fmt.Errorf("vm not ready (%s)", vmState)
-		}
-		var res protocol.ListFilesResult
-		if err := sb.Call(context.Background(), "list_files", protocol.ListFilesParams{Path: ".", Depth: 4, Limit: 50}, &res); err != nil {
-			return fmt.Errorf("guest list_files: %w", err)
-		}
-		fmt.Println("guest ready; files:")
-		for _, p := range res.Paths {
-			fmt.Println(p)
-		}
-		return nil
+		return fmt.Errorf("vm not ready (%s)", vmState)
 	}
 	if execMode {
-		return runExec(sb, *prompt)
+		return runExec(ctx, sb, *prompt)
 	}
 	var transcript []string
 	if resuming {
-		transcript = resumeLog(sess, sb)
+		transcript = resumeLog(ctx, sess, sb)
 		if len(transcript) > 0 {
 			_ = session.WriteTranscript(sess.TranscriptPath(), transcript)
 		}
 	}
-	return tui.Run(cfg, sel, sb, broker, vmState, transcript, resolver, sess.TranscriptPath())
+	return runTUI(ctx, cfg, sel, sb, broker, vmState, transcript, resolver, sess.TranscriptPath())
 }
 
 // Headless logs stream lifecycle; the TUI stays quiet so logs never paint into the UI.
@@ -211,11 +257,11 @@ func brokerForMode(cfg config.File, sel config.Model, resolver *credsource.Resol
 	return b, nil
 }
 
-func pushSecrets(sb *runtime.Sandbox, cfg config.File, resolver *credsource.Resolver, sel config.Model) error {
+func pushSecrets(parent context.Context, sb *runtime.Sandbox, cfg config.File, resolver *credsource.Resolver, sel config.Model) error {
 	if sb.GuestProtocol >= 3 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	secrets, resolveErr := credsource.ResolveSelected(ctx, resolver, cfg, sel)
 	pushErr := sb.PushSecrets(ctx, sel, secrets)
@@ -240,7 +286,7 @@ func scrubLegacySessions() error {
 	return nil
 }
 
-func resumeLog(sess *session.Session, sb *runtime.Sandbox) []string {
+func resumeLog(parent context.Context, sess *session.Session, sb *runtime.Sandbox) []string {
 	if lines, err := session.ReadTranscript(sess.TranscriptPath()); err == nil && len(lines) > 0 {
 		return lines
 	}
@@ -250,7 +296,7 @@ func resumeLog(sess *session.Session, sb *runtime.Sandbox) []string {
 	if len(sb.History) > 0 {
 		return tui.LogFromHistory(sb.History)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	var got protocol.GetContextResult
 	if err := sb.Call(ctx, "get_context", struct{}{}, &got); err == nil && len(got.History) > 0 {
@@ -267,15 +313,13 @@ func resumeLog(sess *session.Session, sb *runtime.Sandbox) []string {
 	return tui.LogFromHistory(hist)
 }
 
-func runExec(sb *runtime.Sandbox, prompt string) error {
+func runExec(ctx context.Context, sb *runtime.Sandbox, prompt string) error {
 	if prompt == "" {
 		return fmt.Errorf("abox exec requires --prompt")
 	}
 	if sb == nil {
 		return fmt.Errorf("agent runs only in the microVM")
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 	enc := json.NewEncoder(os.Stdout)
 	_, err := sb.UserTurnCtx(ctx, prompt, runtime.TurnOptions{RichEvents: true}, func(e protocol.AgentEvent) {
 		_ = enc.Encode(e)
@@ -283,7 +327,11 @@ func runExec(sb *runtime.Sandbox, prompt string) error {
 	return err
 }
 
-func runMCP(args []string) error {
+func runTUI(ctx context.Context, cfg config.File, sel config.Model, sb *runtime.Sandbox, broker *hostbroker.Broker, vmState string, transcript []string, resolver *credsource.Resolver, transcriptPath string) error {
+	return tui.Run(ctx, cfg, sel, sb, broker, vmState, transcript, resolver, transcriptPath)
+}
+
+func runMCP(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: abox mcp add --mode <direct|agentgateway> [--credential-env NAME] <name> <url>\n       abox mcp login <server-name>")
 	}
@@ -294,7 +342,7 @@ func runMCP(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: abox mcp login <server-name>")
 		}
-		return mcpLogin(args[1])
+		return mcpLogin(ctx, args[1])
 	default:
 		return fmt.Errorf("unknown mcp command %q\nusage: abox mcp add --mode <direct|agentgateway> <name> <url>", args[0])
 	}
@@ -333,7 +381,7 @@ func mcpAdd(args []string) error {
 	return nil
 }
 
-func mcpLogin(name string) error {
+func mcpLogin(ctx context.Context, name string) error {
 	cfg, _, err := config.Load()
 	if err != nil {
 		return err
@@ -341,5 +389,5 @@ func mcpLogin(name string) error {
 	if err := credentials.ApplyToEnv(); err != nil {
 		return err
 	}
-	return mcpauth.LoginNamed(context.Background(), cfg, name)
+	return mcpauth.LoginNamed(ctx, cfg, name)
 }

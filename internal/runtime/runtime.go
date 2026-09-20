@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,16 +11,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/config"
+	"github.com/AdminTurnedDevOps/ABox/internal/guestimage"
 	"github.com/AdminTurnedDevOps/ABox/internal/session"
 	"github.com/AdminTurnedDevOps/ABox/internal/vmmconfig"
 	"github.com/AdminTurnedDevOps/ABox/protocol"
-	"golang.org/x/sys/unix"
 )
 
 // ErrGuestTooOld is returned when a v2-only operation is used against a v1 guest.
@@ -34,7 +36,77 @@ const (
 	turnQueueBytes  = 8 << 20
 	writeTimeout    = 30 * time.Second
 	shutdownTimeout = 3 * time.Second
+	diagnosticLimit = 32 << 10
 )
+
+type processWaiter struct {
+	done chan struct{}
+	err  error
+}
+
+func newProcessWaiter(cmd *exec.Cmd) *processWaiter {
+	w := &processWaiter{done: make(chan struct{})}
+	go func() {
+		w.err = cmd.Wait()
+		close(w.done)
+	}()
+	return w
+}
+
+func (w *processWaiter) wait() error {
+	if w == nil {
+		return nil
+	}
+	<-w.done
+	return w.err
+}
+
+type boundedDiagnostics struct {
+	mu        sync.Mutex
+	buf       []byte
+	truncated bool
+}
+
+func (w *boundedDiagnostics) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	remaining := diagnosticLimit - len(w.buf)
+	if remaining > 0 {
+		n := len(p)
+		if n > remaining {
+			n = remaining
+		}
+		w.buf = append(w.buf, p[:n]...)
+	}
+	if len(p) > remaining {
+		w.truncated = true
+	}
+	return len(p), nil
+}
+
+func (w *boundedDiagnostics) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	text := strings.TrimSpace(string(w.buf))
+	if w.truncated {
+		text += " [diagnostics truncated]"
+	}
+	return text
+}
+
+func mapHelperDiagnostic(message string) string {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "undefined symbol"):
+		return "incompatible libkrun package or ABI: " + message
+	case strings.Contains(lower, "error while loading shared libraries") && strings.Contains(lower, "libkrun"):
+		return "libkrun is linked but not loadable; verify the runtime loader path and run ldconfig: " + message
+	case strings.Contains(lower, "libkrunfw") && (strings.Contains(lower, "not found") || strings.Contains(lower, "cannot open")):
+		return "the firmware library required by the installed libkrun package is not loadable; verify the matching libkrunfw package and loader cache: " + message
+	default:
+		return message
+	}
+}
 
 type TurnOptions struct {
 	MaxTurns   int
@@ -74,6 +146,8 @@ type Sandbox struct {
 	GuestProtocol int
 	cmd           *exec.Cmd
 	conn          net.Conn
+	liveness      *os.File
+	process       *processWaiter
 	OnGuestCall   GuestCallHandler
 
 	writeOnce sync.Once
@@ -96,6 +170,7 @@ type Sandbox struct {
 
 	readOnce sync.Once
 	failOnce sync.Once
+	stopOnce sync.Once
 	readDone chan struct{}
 }
 
@@ -221,20 +296,142 @@ func (q *frameQueue) pop(ctx context.Context) (protocol.Frame, bool, error) {
 	}
 }
 
+type prepareOptions struct {
+	resume               bool
+	allowOlderProtocol   bool
+	allowLegacyDarwinImg bool
+}
+
 func Prepare(sess *session.Session, imagePath string, model config.Model, resume bool) error {
-	if imagePath == "" {
-		imagePath = config.GuestImagePath()
+	return prepare(sess, imagePath, model, prepareOptions{resume: resume, allowLegacyDarwinImg: true})
+}
+
+func PrepareProbe(sess *session.Session, imagePath string, model config.Model) error {
+	return prepare(sess, imagePath, model, prepareOptions{allowOlderProtocol: true, allowLegacyDarwinImg: true})
+}
+
+func prepare(sess *session.Session, imagePath string, model config.Model, opts prepareOptions) error {
+	acquired, err := sess.AcquireRuntimeLock()
+	if err != nil {
+		return err
 	}
-	if resume {
+	success := false
+	defer func() {
+		if acquired && !success {
+			_ = sess.ReleaseRuntimeLock()
+		}
+	}()
+	sess.DiagnosticProbe = opts.allowOlderProtocol
+	defaultImagePath := config.GuestImagePath()
+	if imagePath == "" {
+		imagePath = defaultImagePath
+	}
+	backend, err := hostVMMBackend()
+	if err != nil {
+		return err
+	}
+	if opts.resume {
 		if _, err := os.Stat(sess.RootDisk()); err != nil {
 			return fmt.Errorf("resume: session disk missing at %s", sess.RootDisk())
 		}
-	} else {
-		if _, err := os.Stat(imagePath); err != nil {
-			return fmt.Errorf("guest image missing at %s (run: make image)", imagePath)
+		if sess.GuestArch == "" {
+			if goruntime.GOOS != "darwin" || goruntime.GOARCH != "arm64" {
+				return fmt.Errorf("resume: session %s predates image compatibility metadata; start a new session on %s/%s", sess.ID, goruntime.GOOS, goruntime.GOARCH)
+			}
+			sess.GuestArch = "arm64"
+			sess.VMMBackend = "hvf"
+			digest, err := guestimage.Digest(sess.RootDisk())
+			if err != nil {
+				return fmt.Errorf("hash legacy session disk: %w", err)
+			}
+			sess.ImageSHA256 = digest
+			if err := sess.WriteMeta(); err != nil {
+				return fmt.Errorf("backfill legacy session metadata: %w", err)
+			}
 		}
-		if err := cloneFile(imagePath, sess.RootDisk()); err != nil {
-			return fmt.Errorf("clone session disk: %w", err)
+		if sess.GuestArch != goruntime.GOARCH {
+			return fmt.Errorf("resume: session guest architecture is %s, host requires %s", sess.GuestArch, goruntime.GOARCH)
+		}
+		if sess.VMMBackend != backend {
+			return fmt.Errorf("resume: session VMM backend is %s, host requires %s", sess.VMMBackend, backend)
+		}
+		legacyDarwin := goruntime.GOOS == "darwin" && goruntime.GOARCH == "arm64" && sess.ManifestSchema == 0
+		if !legacyDarwin {
+			if sess.ManifestSchema != guestimage.Schema || strings.TrimSpace(sess.ImageID) == "" || !validSHA256(sess.ImageSHA256) {
+				return fmt.Errorf("resume: session %s has incomplete or unsupported image compatibility metadata; start a new session", sess.ID)
+			}
+		} else if !validSHA256(sess.ImageSHA256) {
+			return fmt.Errorf("resume: legacy session %s has no verifiable disk identity; start a new session", sess.ID)
+		}
+		if sess.GuestProtocol > protocol.Version {
+			return fmt.Errorf("resume: session guest protocol %d is newer than host protocol %d", sess.GuestProtocol, protocol.Version)
+		}
+		if sess.GuestProtocol != 0 && !opts.allowOlderProtocol && sess.GuestProtocol != protocol.Version {
+			return fmt.Errorf("resume: session guest protocol %d is incompatible with required protocol %d", sess.GuestProtocol, protocol.Version)
+		}
+		if sess.GuestProtocol == 0 && !legacyDarwin {
+			return fmt.Errorf("resume: session %s does not record a guest protocol; start a new session", sess.ID)
+		}
+	} else {
+		if filepath.Clean(imagePath) == filepath.Clean(defaultImagePath) {
+			lock, err := guestimage.AcquireSharedLock(imagePath)
+			if err != nil {
+				return err
+			}
+			defer lock.Close()
+		}
+		image, err := guestimage.Load(imagePath)
+		if err != nil {
+			if !opts.allowLegacyDarwinImg || !isLegacyDarwinImage(imagePath) || !errors.Is(err, guestimage.ErrManifestMissing) {
+				return fmt.Errorf("guest image %s is unusable: %w (run: make image)", imagePath, err)
+			}
+			resolved, resolveErr := filepath.EvalSymlinks(imagePath)
+			if resolveErr != nil {
+				return fmt.Errorf("guest image missing at %s (run: make image)", imagePath)
+			}
+			if err := cloneFile(resolved, sess.RootDisk()); err != nil {
+				return fmt.Errorf("clone legacy session disk: %w", err)
+			}
+			digest, err := guestimage.Digest(sess.RootDisk())
+			if err != nil {
+				_ = os.Remove(sess.RootDisk())
+				return fmt.Errorf("hash legacy session disk: %w", err)
+			}
+			sess.GuestArch = "arm64"
+			sess.ImageSHA256 = digest
+			sess.VMMBackend = backend
+		} else {
+			if image.Manifest.Arch != goruntime.GOARCH {
+				return fmt.Errorf("guest image architecture is %s, host requires %s", image.Manifest.Arch, goruntime.GOARCH)
+			}
+			if image.Manifest.Protocol > protocol.Version {
+				return fmt.Errorf("guest image protocol %d is newer than host protocol %d", image.Manifest.Protocol, protocol.Version)
+			}
+			if !opts.allowOlderProtocol && image.Manifest.Protocol != protocol.Version {
+				return fmt.Errorf("guest image protocol %d is incompatible with required protocol %d", image.Manifest.Protocol, protocol.Version)
+			}
+			if err := cloneFile(image.Path, sess.RootDisk()); err != nil {
+				return fmt.Errorf("clone session disk: %w", err)
+			}
+			digest, err := guestimage.Digest(sess.RootDisk())
+			if err != nil {
+				_ = os.Remove(sess.RootDisk())
+				return fmt.Errorf("hash session disk: %w", err)
+			}
+			if digest != image.Manifest.SHA256 {
+				_ = os.Remove(sess.RootDisk())
+				return fmt.Errorf("guest image digest mismatch: manifest has %s, cloned image has %s", image.Manifest.SHA256, digest)
+			}
+			sess.ManifestSchema = image.Manifest.Schema
+			sess.GuestArch = image.Manifest.Arch
+			sess.ImageID = image.Manifest.ImageID
+			sess.ImageSHA256 = image.Manifest.SHA256
+			sess.GuestProtocol = image.Manifest.Protocol
+			sess.VMMBackend = backend
+		}
+		if err := sess.WriteMeta(); err != nil {
+			_ = os.Remove(sess.RootDisk())
+			return fmt.Errorf("write session image metadata: %w", err)
 		}
 	}
 	if err := sess.WriteGuestConfig(model); err != nil {
@@ -244,15 +441,56 @@ func Prepare(sess *session.Session, imagePath string, model config.Model, resume
 	if err != nil {
 		return err
 	}
-	return session.WritePaddedConfig(sess.ConfigDisk(), data)
+	if err := session.WritePaddedConfig(sess.ConfigDisk(), data); err != nil {
+		return err
+	}
+	success = true
+	return nil
+}
+
+func validSHA256(value string) bool {
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return false
+	}
+	digest, err := hex.DecodeString(value)
+	return err == nil && len(digest) == 32
+}
+
+func hostVMMBackend() (string, error) {
+	switch goruntime.GOOS {
+	case "darwin":
+		return "hvf", nil
+	case "linux":
+		return "kvm", nil
+	default:
+		return "", fmt.Errorf("unsupported VMM host %s/%s", goruntime.GOOS, goruntime.GOARCH)
+	}
+}
+
+func isLegacyDarwinImage(path string) bool {
+	return goruntime.GOOS == "darwin" && goruntime.GOARCH == "arm64" && filepath.Base(path) == config.LegacyGuestImageName
 }
 
 func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int, ram int) (*Sandbox, error) {
+	acquired, err := sess.AcquireRuntimeLock()
+	if err != nil {
+		return nil, err
+	}
+	lockTransferred := false
+	defer func() {
+		if acquired && !lockTransferred {
+			_ = sess.ReleaseRuntimeLock()
+		}
+	}()
 	if vmmPath == "" {
 		vmmPath = lookPath("abox-vmm")
 	}
 	if vmmPath == "" {
 		return nil, fmt.Errorf("abox-vmm not found; build with make build")
+	}
+	resolvedVMM := exec.Command(vmmPath).Path
+	if err := cleanupStaleHelper(sess, resolvedVMM); err != nil {
+		return nil, err
 	}
 	_ = os.Remove(sess.RPCSocket())
 	ln, err := net.Listen("unix", sess.RPCSocket())
@@ -261,8 +499,13 @@ func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int,
 	}
 	if err := os.Chmod(sess.RPCSocket(), 0o600); err != nil {
 		ln.Close()
+		_ = os.Remove(sess.RPCSocket())
 		return nil, err
 	}
+	defer func() {
+		_ = ln.Close()
+		_ = os.Remove(sess.RPCSocket())
+	}()
 
 	cfg := vmmconfig.Config{
 		VCPU:       uint8(vcpu),
@@ -276,34 +519,82 @@ func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int,
 	}
 	payload, err := json.Marshal(cfg)
 	if err != nil {
-		ln.Close()
 		return nil, err
 	}
 
-	cmd := exec.Command(vmmPath)
+	cmd := exec.Command(resolvedVMM)
 	cmd.Dir = sess.Dir
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + os.Getenv("HOME"),
-		"DYLD_LIBRARY_PATH=/opt/homebrew/lib",
+	cmd.Env = vmmEnvironment()
+	livenessRead, livenessWrite, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("create VMM liveness pipe: %w", err)
 	}
+	defer livenessRead.Close()
+	livenessOwned := true
+	defer func() {
+		if livenessOwned {
+			_ = livenessWrite.Close()
+		}
+	}()
+	cmd.ExtraFiles = []*os.File{livenessRead}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		ln.Close()
 		return nil, err
 	}
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	diagnostics := &boundedDiagnostics{}
+	output := io.MultiWriter(os.Stderr, diagnostics)
+	cmd.Stdout = output
+	cmd.Stderr = output
 	if err := cmd.Start(); err != nil {
-		ln.Close()
+		_ = stdin.Close()
 		return nil, fmt.Errorf("start abox-vmm: %w", err)
 	}
-	if _, err := stdin.Write(payload); err != nil {
-		cmd.Process.Kill()
-		ln.Close()
-		return nil, err
+	if err := recordHelper(sess, cmd.Process.Pid, cmd.Path); err != nil {
+		_ = stdin.Close()
+		_ = livenessWrite.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("record VMM helper identity: %w", err)
 	}
-	stdin.Close()
+	_ = livenessRead.Close()
+	process := newProcessWaiter(cmd)
+	reapFailure := func() {
+		_ = stdin.Close()
+		_ = livenessWrite.Close()
+		_ = cmd.Process.Kill()
+		_ = process.wait()
+		_ = clearHelper(sess)
+	}
+	helperError := func(prefix string) error {
+		waitErr := process.wait()
+		_ = clearHelper(sess)
+		status := "unknown status"
+		if cmd.ProcessState != nil {
+			status = cmd.ProcessState.String()
+		}
+		if waitErr != nil {
+			status = waitErr.Error()
+		}
+		message := diagnostics.String()
+		if message != "" {
+			return fmt.Errorf("%s (%s): %s", prefix, status, message)
+		}
+		return fmt.Errorf("%s (%s)", prefix, status)
+	}
+	if _, err := stdin.Write(payload); err != nil {
+		reapFailure()
+		if message := mapHelperDiagnostic(diagnostics.String()); message != "" {
+			return nil, fmt.Errorf("write abox-vmm config: %w: %s", err, message)
+		}
+		return nil, fmt.Errorf("write abox-vmm config: %w", err)
+	}
+	if err := stdin.Close(); err != nil {
+		reapFailure()
+		if message := mapHelperDiagnostic(diagnostics.String()); message != "" {
+			return nil, fmt.Errorf("close abox-vmm config: %w: %s", err, message)
+		}
+		return nil, fmt.Errorf("close abox-vmm config: %w", err)
+	}
 
 	type acc struct {
 		c   net.Conn
@@ -319,30 +610,63 @@ func Start(ctx context.Context, sess *session.Session, vmmPath string, vcpu int,
 	var conn net.Conn
 	select {
 	case <-ctx.Done():
-		cmd.Process.Kill()
-		ln.Close()
+		reapFailure()
 		return nil, ctx.Err()
+	case <-process.done:
+		return nil, helperError("abox-vmm exited before guest RPC connected")
 	case a := <-ch:
 		if a.err != nil {
-			cmd.Process.Kill()
-			ln.Close()
+			select {
+			case <-process.done:
+				return nil, helperError("abox-vmm exited before guest RPC connected")
+			default:
+			}
+			reapFailure()
 			return nil, fmt.Errorf("guest rpc accept: %w", a.err)
 		}
 		conn = a.c
 	}
-
-	sb := &Sandbox{Sess: sess, cmd: cmd, conn: conn, calls: map[string]*frameQueue{}}
-	if err := sb.waitHello(ctx); err != nil {
-		sb.Stop()
-		return nil, err
+	select {
+	case <-process.done:
+		_ = conn.Close()
+		return nil, helperError("abox-vmm exited during guest RPC connect")
+	default:
 	}
+
+	livenessOwned = false
+	sb := &Sandbox{
+		Sess: sess, cmd: cmd, conn: conn, liveness: livenessWrite, process: process,
+		calls: map[string]*frameQueue{},
+	}
+	if err := sb.waitHello(ctx); err != nil {
+		result := err
+		select {
+		case <-process.done:
+			result = helperError("abox-vmm exited before guest hello")
+		default:
+		}
+		_ = sb.Stop()
+		return nil, result
+	}
+	lockTransferred = true
 	return sb, nil
 }
 
 func (s *Sandbox) waitHello(ctx context.Context) error {
-	_ = s.conn.SetDeadline(time.Now().Add(15 * time.Second))
+	deadline := time.Now().Add(15 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = s.conn.SetDeadline(deadline)
+	stop := context.AfterFunc(ctx, func() {
+		_ = s.conn.SetDeadline(time.Now())
+	})
+	defer stop()
 	frame, err := protocol.ReadFrame(s.conn)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("guest hello: %w", err)
 	}
 	if frame.Method != "hello" {
@@ -355,17 +679,42 @@ func (s *Sandbox) waitHello(ctx context.Context) error {
 	if hello.SessionID != s.Sess.ID || hello.Capability != s.Sess.Capability {
 		return fmt.Errorf("guest capability mismatch")
 	}
+	guestProtocol := hello.Protocol
+	if guestProtocol == 0 {
+		guestProtocol = 1
+	}
+	reject := func(message string) error {
+		result, _ := protocol.EncodeParams(protocol.HelloResult{Accepted: false, Message: message, Protocol: protocol.Version})
+		_ = protocol.WriteFrame(s.conn, protocol.Frame{ID: frame.ID, Result: result})
+		return errors.New(message)
+	}
+	if guestProtocol > protocol.Version {
+		return reject(fmt.Sprintf("guest protocol %d is newer than host protocol %d", guestProtocol, protocol.Version))
+	}
+	if guestProtocol != protocol.Version && !s.Sess.DiagnosticProbe {
+		return reject(fmt.Sprintf("guest protocol %d is incompatible with required protocol %d", guestProtocol, protocol.Version))
+	}
+	if s.Sess.GuestProtocol != 0 && guestProtocol != s.Sess.GuestProtocol {
+		return reject(fmt.Sprintf("guest protocol %d does not match session metadata %d", guestProtocol, s.Sess.GuestProtocol))
+	}
+	if s.Sess.ImageID != "" && hello.ImageID != s.Sess.ImageID {
+		return reject(fmt.Sprintf("guest image id %q does not match session metadata %q", hello.ImageID, s.Sess.ImageID))
+	}
+	if guestProtocol == protocol.Version && strings.TrimSpace(hello.ImageID) == "" {
+		return reject("guest did not report an image id")
+	}
+	if s.Sess.GuestProtocol == 0 {
+		s.Sess.GuestProtocol = guestProtocol
+		s.Sess.ImageID = hello.ImageID
+		if err := s.Sess.WriteMeta(); err != nil {
+			return reject(fmt.Sprintf("record guest compatibility metadata: %v", err))
+		}
+	}
 	ok, _ := protocol.EncodeParams(protocol.HelloResult{Accepted: true, Protocol: protocol.Version})
 	if err := protocol.WriteFrame(s.conn, protocol.Frame{ID: frame.ID, Result: ok}); err != nil {
 		return err
 	}
-	if hello.Protocol == 0 {
-		s.GuestProtocol = 1
-	} else if hello.Protocol > protocol.Version {
-		s.GuestProtocol = protocol.Version
-	} else {
-		s.GuestProtocol = hello.Protocol
-	}
+	s.GuestProtocol = guestProtocol
 	s.History = hello.History
 	_ = s.conn.SetDeadline(time.Time{})
 	return nil
@@ -900,48 +1249,43 @@ func (s *Sandbox) TransferArchive(ctx context.Context, archive []byte) error {
 }
 
 func (s *Sandbox) Stop() error {
-	if s.conn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		_ = s.Call(ctx, "shutdown", map[string]bool{"ok": true}, nil)
-		cancel()
-		if s.lifeCancel != nil {
-			s.lifeCancel()
+	s.stopOnce.Do(func() {
+		if s.conn != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			_ = s.Call(ctx, "shutdown", map[string]bool{"ok": true}, nil)
+			cancel()
+			if s.lifeCancel != nil {
+				s.lifeCancel()
+			}
+			_ = s.conn.Close()
 		}
-		_ = s.conn.Close()
-	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Signal(os.Interrupt)
-		done := make(chan struct{})
-		go func() {
-			s.cmd.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			_ = s.cmd.Process.Kill()
+		s.stopHelper(shutdownTimeout)
+		if s.Sess != nil {
+			_ = os.Remove(s.Sess.RPCSocket())
+			_ = clearHelper(s.Sess)
+			_ = s.Sess.ReleaseRuntimeLock()
 		}
-	}
+	})
 	return nil
 }
 
-func cloneFile(src, dst string) error {
-	_ = os.Remove(dst)
-	if err := unix.Clonefile(src, dst, 0); err == nil {
-		return os.Chmod(dst, 0o600)
+func (s *Sandbox) stopHelper(timeout time.Duration) {
+	if s.cmd != nil && s.cmd.Process != nil && s.process != nil {
+		select {
+		case <-s.process.done:
+		default:
+			_ = s.cmd.Process.Signal(helperStopSignal())
+			select {
+			case <-s.process.done:
+			case <-time.After(timeout):
+				_ = s.cmd.Process.Kill()
+			}
+		}
+		_ = s.process.wait()
 	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+	if s.liveness != nil {
+		_ = s.liveness.Close()
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
 }
 
 func lookPath(name string) string {

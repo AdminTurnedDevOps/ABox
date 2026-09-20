@@ -60,7 +60,7 @@ type Resolver struct {
 func NewResolver() *Resolver {
 	r := &Resolver{sources: map[string]Source{}}
 	r.Register("env", envSource{})
-	r.Register("keychain", keychainSource{})
+	r.Register("keystore", keystoreSource{})
 	r.Register("vault", vaultSource{})
 	r.Register("azure", azureSource{})
 	r.Register("aws", awsSource{})
@@ -70,10 +70,11 @@ func NewResolver() *Resolver {
 func (r *Resolver) Register(name string, s Source) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sources[name] = s
+	r.sources[config.CanonicalCredentialSource(name)] = s
 }
 
 func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Value, error) {
+	ref.Source = config.CanonicalCredentialSource(ref.Source)
 	r.mu.Lock()
 	s, ok := r.sources[ref.Source]
 	r.mu.Unlock()
