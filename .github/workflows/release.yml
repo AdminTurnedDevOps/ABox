@@ -115,6 +115,7 @@ jobs:
         run: |
           set -euo pipefail
           brew tap libkrun/krun
+          brew trust libkrun/krun
           brew install --build-from-source libkrunfw
           brew install libkrun
           test "$(brew list --versions libkrun)" = 'libkrun 1.19.4'
@@ -179,8 +180,8 @@ jobs:
         run: |
           set -euo pipefail
           useradd --create-home --shell /bin/bash abox-build
-          chown -R abox-build:abox-build "$GITHUB_WORKSPACE"
           epoch=$(git show -s --format=%ct "$GITHUB_SHA")
+          chown -R abox-build:abox-build "$GITHUB_WORKSPACE"
           runuser -u abox-build -- env HOME=/home/abox-build PATH="$PATH" \
             GITHUB_WORKSPACE="$GITHUB_WORKSPACE" TAG="$TAG" SOURCE_DATE_EPOCH="$epoch" \
             sh -c '
