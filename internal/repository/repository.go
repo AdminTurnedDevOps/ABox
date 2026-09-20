@@ -146,6 +146,11 @@ func exclusionsWithin(root string, paths []string) ([]string, error) {
 			return nil, fmt.Errorf("resolve excluded path: %w", err)
 		}
 		absolute = filepath.Clean(absolute)
+		if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+			absolute = resolved
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("resolve excluded path symlinks: %w", err)
+		}
 		if absolute == filepath.Clean(root) {
 			return nil, fmt.Errorf("source directory %q is host-only ABox state; run abox from a Git worktree", root)
 		}

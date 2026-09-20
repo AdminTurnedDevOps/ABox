@@ -30,9 +30,19 @@ func TestGuestCommandDropsPrivilegesAndCreatesProcessGroup(t *testing.T) {
 }
 
 func TestGuestCommandBackgroundChildCannotHangWait(t *testing.T) {
-	repo := Repo{Root: t.TempDir()}
+	root, err := os.MkdirTemp("", "abox-guest-command-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if os.Geteuid() == 0 {
+		if err := os.Chown(root, guestUID, guestGID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repo := Repo{Root: root}
 	start := time.Now()
-	_, _, _, _, _, err := repo.RunContext(context.Background(), "sleep 30 &", filepath.Clean("."), 5*time.Second, 1024)
+	_, _, _, _, _, err = repo.RunContext(context.Background(), "sleep 30 &", filepath.Clean("."), 5*time.Second, 1024)
 	if err == nil {
 		t.Fatal("background child unexpectedly outlived command without an error")
 	}

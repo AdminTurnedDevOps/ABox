@@ -33,7 +33,15 @@ func TestLoadResolvesPointerAndValidatesManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Path != image || got.Manifest.SHA256 != digest {
+	expectedPath, err := filepath.EvalSymlinks(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedPath, err = filepath.Abs(expectedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Path != expectedPath || got.Manifest.SHA256 != digest {
 		t.Fatalf("got %#v", got)
 	}
 }

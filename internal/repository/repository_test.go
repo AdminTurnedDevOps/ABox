@@ -33,6 +33,19 @@ func runGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func sameFile(t *testing.T, left, right string) bool {
+	t.Helper()
+	leftInfo, err := os.Stat(left)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rightInfo, err := os.Stat(right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return os.SameFile(leftInfo, rightInfo)
+}
+
 func TestOpenForSessionDiscoversCleanGitRoot(t *testing.T) {
 	root := t.TempDir()
 	runGit(t, root, "init", "-b", "main")
@@ -49,7 +62,7 @@ func TestOpenForSessionDiscoversCleanGitRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.Ephemeral || snap.Root != root || snap.HostSource != root || snap.HEAD == "" {
+	if snap.Ephemeral || !sameFile(t, snap.Root, root) || !sameFile(t, snap.HostSource, root) || snap.HEAD == "" {
 		t.Fatalf("snapshot=%+v", snap)
 	}
 	archive, err := ArchiveHEAD(snap.Root)
@@ -103,7 +116,7 @@ func TestOpenForSessionSnapshotsDirtyWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !snap.Ephemeral || snap.HostSource != root || snap.Root == root {
+	if !snap.Ephemeral || !sameFile(t, snap.HostSource, root) || sameFile(t, snap.Root, root) {
 		t.Fatalf("snapshot=%+v", snap)
 	}
 	archive, err := ArchiveHEAD(snap.Root)
@@ -146,8 +159,13 @@ func TestOpenForSessionExcludesHostState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(state, "credentials.env"), []byte("SECRET=value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	alias := filepath.Join(t.TempDir(), "repo-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	stateAlias := filepath.Join(alias, ".abox")
 
-	snap, err := OpenForSessionExcluding(root, filepath.Join(state, "sessions", "test", "host-tree"), state)
+	snap, err := OpenForSessionExcluding(alias, filepath.Join(state, "sessions", "test", "host-tree"), stateAlias)
 	if err != nil {
 		t.Fatal(err)
 	}

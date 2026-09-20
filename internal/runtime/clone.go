@@ -2,12 +2,20 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 )
 
 func cloneFile(src, dst string) (retErr error) {
 	_ = os.Remove(dst)
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("clone source is not a regular file: %s", src)
+	}
 	if err := platformCloneFile(src, dst); err == nil {
 		if err := os.Chmod(dst, 0o600); err != nil {
 			_ = os.Remove(dst)
