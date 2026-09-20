@@ -25,7 +25,7 @@ jobs:
           cache: true
       - run: make test
       - run: CGO_ENABLED=0 go test ./cmd/...
-      - run: go vet ./...
+      - run: CGO_ENABLED=0 go vet ./...
       - run: go build -o /tmp/abox ./cmd/abox
       - run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags abox_guest -o /tmp/abox-guest ./cmd/abox-guest
 
@@ -88,6 +88,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run real pkg-config/cgo compatibility checks
+        env:
+          GOFLAGS: -buildvcs=false
         run: |
           set -euo pipefail
           sh scripts/check-libkrun.sh 1.19.4 libkrunfw.so.5
@@ -129,6 +131,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run real pkg-config/cgo compatibility checks
+        env:
+          GOFLAGS: -buildvcs=false
         run: |
           set -euo pipefail
           sh scripts/check-libkrun.sh 1.19.0 libkrunfw.so.5
