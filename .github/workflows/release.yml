@@ -180,13 +180,14 @@ jobs:
         run: |
           set -euo pipefail
           useradd --create-home --shell /bin/bash abox-build
-          epoch=$(git show -s --format=%ct "$GITHUB_SHA")
           chown -R abox-build:abox-build "$GITHUB_WORKSPACE"
           runuser -u abox-build -- env HOME=/home/abox-build PATH="$PATH" \
-            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" TAG="$TAG" SOURCE_DATE_EPOCH="$epoch" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" GITHUB_SHA="$GITHUB_SHA" TAG="$TAG" \
             sh -c '
               set -eu
               cd "$GITHUB_WORKSPACE"
+              SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")
+              export SOURCE_DATE_EPOCH
               sh scripts/check-libkrun.sh 1.19.4 libkrunfw.so.5
               CGO_ENABLED=1 make test
                CGO_ENABLED=1 make abox vmm guest GUEST_ARCH=amd64 IMAGE_ID="$TAG"
