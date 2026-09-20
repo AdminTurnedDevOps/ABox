@@ -24,15 +24,17 @@ The agent, prompts, model calls, and tools runs in isolation.
 
 Right now, the industry is incredibly focused on agent sandboxes for production (servers, cloud, Kubernetes, etc), but the biggest security entry point are agents running locally on someone’s laptop.
 
-**Status:** experimental. Runnable today: guest agent (prompt, tools) in a
-libkrun microVM on Apple Silicon; host TUI/SDK, LLM/MCP brokers, and
-`run_command` approval. Protocol 4.
+**Status:** experimental. Runnable today on Apple Silicon: guest agent (prompt,
+tools) in a libkrun microVM; host TUI/SDK, LLM/MCP brokers, and `run_command`
+approval. Protocol 4. The Linux host port and build/image paths are implemented,
+but Linux VMM execution, release support, and KVM isolation remain **Planned**
+pending separate Phase 0.5 and Phase 18 hardware evidence on the pinned Arch and
+Fedora baselines.
 
 ## Prerequisites
 
-- Apple Silicon Mac or Linux
-- Go 1.24+
-- Docker (today: pack the guest **root filesystem** image only; not on the session path)
+- Apple Silicon Mac for the currently runnable host path
+- Go 1.25+
 - libkrun and libkrunfw (VMM + **guest Linux kernel**; the kernel is not inside the `.raw` disk)
 
 ### Mac
@@ -44,20 +46,31 @@ brew install libkrun libkrunfw
 
 ### Linux
 
+Linux builds require cgo, gcc, pkg-config, and libkrun 1.19.x headers. The
+pinned build baselines are Arch's 2026-09-17 x86_64 snapshot with
+libkrun `1.19.4-1` / libkrunfw `5.5.0-1`, and Fedora 44 x86_64 with
+libkrun/libkrun-devel `1.19.0-1.fc44` / libkrunfw `5.5.0-1.fc44`.
+
+Linux `make image` is rootless and native: no Docker, root, loop mount, or
+privileged container. It additionally needs `fakeroot`, e2fsprogs 1.43+,
+`curl` or `wget`, `sha256sum`, `tar`, `od`, `awk`, and `flock`.
+
+See [Platform support](docs/platforms.md) for package commands and the precise
+support boundary. WSL2 and running the VMM inside a container are unsupported;
+containers remain valid compile/image-build environments.
+
 ## Quickstart
 
-From this directory or any other directory. ABox snapshots that exact directory
-without inspecting host Git state. `.git` metadata is excluded; the guest
-creates its own private baseline for change tracking.
-
-Git ignore rules are not consulted. Every regular file beneath the selected
-directory is copied, including dotfiles, except `.git` metadata. Start ABox
-from a directory containing only files the guest is allowed to read.
+Run ABox from anywhere inside a Git worktree. ABox discovers the repository
+root and copies a private snapshot into the guest without modifying host Git.
+Clean worktrees use committed `HEAD`; dirty or commitless worktrees snapshot
+tracked files plus non-ignored untracked files. Git-ignored files, `.git`
+metadata, and the host-only `~/.abox` directory are not copied.
 ![](img/abox-quickstart.gif)
 ### Mac
 
-`make image`: uses Docker once (today) to pack a raw ext4 root filesystem
-(`~/.abox/images/abox-guest.raw`): Alpine userspace, git, patch, and
+`make image`: uses Docker once to pack a raw ext4 root filesystem
+(`~/.abox/images/abox-guest-linux-arm64.raw`): Alpine userspace, git, patch, and
 abox-guest. Not the guest kernel. Needed the first time, or when you want a
 full disk rebuild. Depends on `make guest`.
 
@@ -90,11 +103,37 @@ abox
 
 ### Linux
 
+Build-only workflow on either pinned baseline:
+
+```bash
+make build
+make image GUEST_ARCH=amd64
+```
+
+For the local amd64 test bundle built on this machine, add both `abox` and its
+bundled `abox-vmm` helper to the current shell's `PATH`:
+
+```bash
+export PATH="$HOME/abox-local-linux-amd64:$PATH"
+cd "$HOME/gitrepos/ABox"
+abox --probe-vm
+abox
+```
+
+Run those commands from anywhere inside the Git worktree you want ABox to
+snapshot. The normal state and configuration location is `~/.abox`; the guest
+image is at `~/.abox/images/abox-guest-linux-amd64.raw`.
+
+Do not present a successful Linux build or boot probe as supported KVM
+isolation. Native Arch and Fedora x86_64 Phase 0.5/18 evidence is still
+required before using this as a supported runtime workflow.
+
 ## microVM > Docker
 
 `abox` does not run the agent in Docker. A session is a **libkrun microVM**:
-Linux kernel + `abox-guest` on Apple Hypervisor.framework. The guest repo is
-a copy of your files on that VM disk, not a container mount.
+Linux kernel + `abox-guest` on Apple Hypervisor.framework, or on the implemented
+but not yet hardware-qualified Linux/KVM path. The guest source tree is a copy
+of your files on that VM disk, not a container mount.
 
 ### Kernel vs disk
 
@@ -102,19 +141,19 @@ The `.raw` file is **only a disk**: a 768 MiB ext4 **root filesystem**
 (userspace). Alpine base, `git`, `patch`, `/usr/local/bin/abox-guest`. No
 kernel, no bootloader, no hypervisor.
 
-The guest kernel comes from **libkrunfw** (Homebrew), not from that disk.
-`abox-vmm` links libkrun + libkrunfw, starts the VM, then attaches host files
-as virtio-blk:
+The guest kernel comes from **libkrunfw**, not from that disk. `abox-vmm` starts
+libkrun, which uses Hypervisor.framework on macOS or KVM on Linux, then attaches
+host files as virtio-blk:
 
 ```text
 abox
   → abox-vmm
       → libkrun (userspace VMM)
       → libkrunfw          ← Linux kernel
-      → Hypervisor.framework
-      → ARM virtualization
+      → Hypervisor.framework (macOS) / KVM (Linux, Planned support)
+      → hardware virtualization
 
-host:  ~/.abox/sessions/<id>/root.raw     ordinary Mac file (ext4)
+host:  ~/.abox/sessions/<id>/root.raw     ordinary host file (ext4)
          ↓ libkrun virtio-blk
 guest: /dev/vda                           block device
          ↓ kernel mounts ext4 as /
@@ -128,20 +167,24 @@ guest: /dev/vdb                           session id + model alias (no secrets)
 Swap the `.raw` and you change userspace. Swap libkrunfw and you change the
 guest kernel.
 
-### Docker packs that filesystem (today)
+### Platform image builders
 
-Docker is only the packer: a privileged container runs `apk` and `mkfs.ext4`
-because a Mac cannot build that ARM64 ext4 tree itself. Session boot does not
-use Docker. Replacing this packer is follow-up work.
+On macOS, Docker is only the packer: a privileged container runs `apk` and
+`mkfs.ext4` because macOS cannot build that ext4 tree natively. On Linux, the
+native builder uses `apk.static`, `fakeroot`, and `mke2fs -d` as an ordinary
+user. Session boot never uses Docker.
 
 | Step | What runs |
 | --- | --- |
-| `make image` | Docker, to pack the golden **root filesystem** (ext4 `.raw`) |
-| `make image-update` | Docker, to replace `/usr/local/bin/abox-guest` on that `.raw` |
+| `make image` (macOS) | Docker, to pack the golden **root filesystem** (ext4 `.raw`) |
+| `make image` / `make image-update` (Linux) | Rootless native rebuild; no Docker or KVM |
 | `abox` / `--probe-vm` | `abox` + `abox-vmm` + libkrun + libkrunfw. No Docker. |
 
-1. Golden image — ~/.abox/images/abox-guest.raw
-Packed once (make image). Alpine + git + patch + abox-guest. Template only. Not attached to a running VM.
+1. Golden image: `~/.abox/images/abox-guest-linux-<arch>.raw`
+Packed once (`make image`). Alpine + git + patch + abox-guest. Template only.
+Not attached to a running VM. Its resolved immutable image has an adjacent
+`.manifest.json` recording schema, architecture, image ID, protocol, and
+SHA-256. Custom images require the same adjacent manifest.
 
 2. Session hard disk — ~/.abox/sessions/<id>/root.raw
 Clone of (1) for that run. This is /dev/vda → /. Repo, guest Git, agent writes. Destroy the session dir and this disk is gone; the golden stays.
@@ -151,7 +194,11 @@ ABox does not boot (1). It copies (1) → (2), then the microVM uses (2). --resu
 3. Config disk — sessions/<id>/config.raw
 ~1 MiB, read-only /dev/vdb. Session id and model alias. No API keys, no MCP URLs. Not cloned from the golden image, not an OS. It lives inside of the directory where your sandbox harness session lives.
 
-The VM boots **only** the session clone, not the golden file. Destroy a session directory and that run’s guest files are gone; the golden image stays clean for the next `abox`. `make image-update` patches `/usr/local/bin/abox-guest` on an existing golden disk; `make image` rebuilds the golden disk from scratch.
+The VM boots **only** the session clone, not the golden file. Destroy a session
+directory and that run's guest files are gone; the golden image stays clean for
+the next `abox`. `make image-update` refreshes the golden image with the current
+guest binary (a full new generation on Linux); `make image` rebuilds it from
+scratch.
 
 ### Resume Command
 
@@ -299,7 +346,7 @@ The following credential providers are supported (where your LLM API key lives):
 | Source | `name` is | Auth |
 | --- | --- | --- |
 | `env` | environment variable (also reads `~/.abox/credentials.env`) | — |
-| `keychain` | macOS keychain account (service `abox`) | — |
+| `keystore` | macOS Keychain or Linux Secret Service account (service `abox`) | `secret-tool` + `gdbus` + a provider on Linux |
 | `vault` | Vault KV v2 path (`secret/abox/anthropic`) | `VAULT_ADDR` + `VAULT_TOKEN` (or `~/.vault-token`) |
 | `azure` | Key Vault secret URI (`https://myvault.vault.azure.net/secrets/name`) | `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET`, or `az login` |
 | `aws` | Secrets Manager secret id | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (`AWS_REGION`), or `~/.aws/credentials` |
@@ -308,15 +355,23 @@ Config lives at `~/.abox/config.yaml`. Keys are **not** stored in that file. Eac
 
 ```yaml
 credential:
-  source: keychain            # env | keychain | vault | azure | aws
-  name: ANTHROPIC_API_KEY     # env var, keychain account, vault path, Azure secret URI, or AWS secret id
+  source: keystore            # env | keystore | vault | azure | aws
+  name: ANTHROPIC_API_KEY     # env var, OS-keystore account, vault path, Azure secret URI, or AWS secret id
   # field: value              # vault/aws only
   # version: "4"              # vault/azure only
 ```
 
 `credential_env: XAI_API_KEY` is the same as `{source: env, name: XAI_API_KEY}`.
 
-`/provider` and `/mcp` in the TUI save to the macOS keychain first, falling back to `credentials.env` (mode 0600) if the keychain is locked or missing. `/credential` writes a Vault / Azure Key Vault / AWS Secrets Manager reference into `config.yaml` (it does not store cloud tokens). When the cloud auth env vars are unset, Azure uses the local `az login` session and AWS uses `~/.aws/credentials` (and region from `~/.aws/config`). `abox creds migrate` moves existing `credentials.env` entries into the keychain.
+`/provider` and `/mcp` save to the OS keystore first: macOS Keychain or Linux
+Secret Service. Linux supports GNOME Keyring, KWallet's Secret Service
+compatibility service, and KeePassXC. If the keystore is absent, locked, loses
+its provider, or times out, ABox warns and falls back to `credentials.env`
+(mode 0600). `keychain` and `secretservice` remain accepted config aliases, but
+saved config uses `keystore`. `/credential` writes a Vault / Azure Key Vault /
+AWS Secrets Manager reference into `config.yaml`; those sources are portable
+and are the supported headless Linux alternatives. `abox creds migrate` moves
+existing file entries into the available OS keystore.
 
 LLM keys and MCP tokens stay on the host. The guest never receives them.
 
@@ -338,7 +393,7 @@ type StreamableClientTransport struct {
 
 `StreamableClientTransport` is the best choice for this architectural setup as when running an AI agent inside an isolated sandbox (e.g., microVM), the sandbox itself becomes part of your security trust boundary.
 
-![](img/mcpsandbox.png.png)
+![](img/mcpsandbox.png)
 
 Config lives at `~/.abox/config.yaml` (same pattern as `~/.claude`, `~/.codex`). First `abox` run creates `~/.abox/` (mode 0700) and a default `config.yaml` if they are missing. MCP tokens use the same credential sources as LLM keys (see [Credentials](#credentials)).
 
@@ -413,9 +468,11 @@ _, err = sess.Turn(ctx, "List the repo files", func(ev abox.Event) {
 })
 ```
 
-Import `github.com/AdminTurnedDevOps/ABox/pkg/abox`. Apple Silicon, libkrun,
-golden image. `Open` / `Resume` require protocol 4 (host LLM/MCP brokers and
-`run_command` approval). Resume of a pre-rebuild disk returns `ErrGuestTooOld`.
+Import `github.com/AdminTurnedDevOps/ABox/pkg/abox`. The SDK needs a qualified
+host runtime, libkrun/libkrunfw, and an architecture-tagged golden image plus
+manifest. Linux runtime support remains Planned as described above. `Open` /
+`Resume` require protocol 4 (host LLM/MCP brokers and `run_command` approval).
+Resume of a pre-rebuild disk returns `ErrGuestTooOld`.
 
 ## Why?
 
@@ -463,8 +520,8 @@ isolation stays Planned.
 
 Do not describe this build as verified isolation. The device plan is
 allowlisted (no guest NIC, no TSI inet, no host-path virtio-fs). LLM and MCP
-HTTPS are host-brokered. Claims stay Planned until the hardware suite in
-`PLAN.md` §21.4 passes.
+HTTPS are host-brokered. Claims stay Planned until the platform-specific Phase
+0.5 and Phase 18 hardware suites in `PLAN.md` §21.4/§22 pass.
 
 ## Whats Currently In Place
 
@@ -474,7 +531,7 @@ HTTPS are host-brokered. Claims stay Planned until the hardware suite in
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ Agent loop       │ In the guest. Host is TUI + VMM + LLM/MCP brokers                    │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ MicroVM boot     │ libkrun 1.19.4, raw disks, vsock, abox-vmm                           │
+│ MicroVM boot     │ libkrun 1.19.x, raw disks, vsock, abox-vmm                           │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ Five tools       │ list_files, read_file, search, apply_patch, run_command in guest     │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
@@ -488,7 +545,7 @@ HTTPS are host-brokered. Claims stay Planned until the hardware suite in
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ TUI              │ Instrument panel; /provider /credential /mcp /help; cmd approval     │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
-│ Credentials      │ env, keychain, vault, azure, aws. Keys stay on the host              │
+│ Credentials      │ env, keystore, vault, azure, aws. Keys stay on the host              │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
 │ Approvals        │ run_command prompts (default deny). MCP tools do not                 │
 ├──────────────────┼──────────────────────────────────────────────────────────────────────┤
@@ -509,9 +566,6 @@ Harness
 Runtime
 • Cold checkpoint, rollback, fork (quiesce ioctl exists; no lineage/UI)
 • Idle-stop / resume / preserve
-• Image manifest + SHA-256 verify
-• VMM liveness pipe, stale-PID cleanup
-• Orderly shutdown via krun_get_shutdown_eventfd
 • Device-plan unit tests; hardware canary suite (§21.4 / §22)
 • Resource budgets and named-machine benches
 
@@ -523,4 +577,4 @@ Providers (as specified)
 Docs / Phase 0 leftovers
 • threat model, ADRs, roadmap
 • Phase 0.5 spike recorded as Planned vs verified
-• PLAN still says “no TSI” in one table and “TSI inet for HTTPS” in another — needs a single decision (code: vsock flags 0, no TSI)
+• Separate macOS/HVF and Linux/KVM Phase 0.5 and Phase 18 evidence records

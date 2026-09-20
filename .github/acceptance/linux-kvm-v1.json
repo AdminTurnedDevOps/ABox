@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "predicate_type": "https://github.com/AdminTurnedDevOps/ABox/attestations/kvm-test/v1",
+  "source": [
+    "PLAN.md#214-hardware-security-tests",
+    "PLAN.md#22-security-acceptance-matrix",
+    "PLAN-LINUX.md#verification"
+  ],
+  "tests": [
+    "packaged-artifact-boot",
+    "device-plan-no-nic-gpu-sound-host-fs",
+    "host-home-canary-unreachable",
+    "ssh-canary-unreachable",
+    "cloud-credential-canary-unreachable",
+    "docker-socket-canary-unreachable",
+    "repository-private-disk-only",
+    "guest-loopback-and-unix-sockets-work",
+    "host-lan-external-ipv4-ipv6-unreachable",
+    "tsi-inet-and-unix-hijack-disabled",
+    "destructive-guest-command-host-unchanged",
+    "run-command-unprivileged-no-background",
+    "direct-provider-mode",
+    "gateway-device-plan-identical",
+    "mcp-no-host-shell",
+    "host-fetch-policy-enforced",
+    "repository-instructions-cannot-relax-policy",
+    "lifecycle-cleanup-and-supervisor-death",
+    "default-resource-budget"
+  ]
+}

@@ -28,8 +28,9 @@ sess, err := abox.Open(ctx, abox.Options{})
 
 Each child page has the matching `abox` CLI (or `config.yaml`) and a sample
 `main` that calls one SDK method. Copy the Go into your program. `abox-vmm`
-on `PATH` (the `darwin_arm64` archive on the
-[GitHub release](https://github.com/AdminTurnedDevOps/ABox/releases)). Golden
+must be on `PATH` (the current runnable release path is `darwin_arm64`; Linux
+release support remains gated) from the
+[GitHub release](https://github.com/AdminTurnedDevOps/ABox/releases). Golden
 image and provider key: [Quickstart]({{ '/quickstart' | relative_url }}).
 Probe methods do not need a key. A successful `Open` speaks protocol 4.
 

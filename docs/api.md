@@ -39,12 +39,15 @@ Always `defer sess.Close()`. `Close` stops the VM and the host broker.
 | --- | --- | --- |
 | `RepoPath` | `string` | cwd; exact source directory snapshotted by `Open` |
 | `Model` | `string` | first profile in `config.yaml` |
-| `Image` | `string` | config / `~/.abox/images/abox-guest.raw` |
+| `Image` | `string` | config / `~/.abox/images/abox-guest-linux-<GOARCH>.raw` |
 | `VMMPath` | `string` | config or `abox-vmm` on `PATH` |
 | `VCPU`, `RAMMiB` | `int` | `0` = config resolved (1 / 768) |
 | `BootTimeout` | `time.Duration` | 45s |
 
 Home directory is `~/.abox` unless `ABOX_HOME` is set.
+Every image requires an adjacent `.manifest.json`; architecture, protocol, and
+digest are checked before the session disk is accepted. Linux rejects legacy
+metadata-free images and sessions.
 
 ## Session
 

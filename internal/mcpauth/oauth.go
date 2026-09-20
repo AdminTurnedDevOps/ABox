@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -57,9 +58,18 @@ type tokenResp struct {
 var savePreferred = credsource.SavePreferred
 
 var (
-	oauthURLValidator = validatePublicOAuthURL
-	lookupOAuthHost   = net.DefaultResolver.LookupIPAddr
-	blockedOAuthNets  = []*net.IPNet{
+	oauthURLValidator           = validatePublicOAuthURL
+	lookupOAuthHost             = net.DefaultResolver.LookupIPAddr
+	browserLookPath             = trustedBrowserLauncher
+	oauthStderr       io.Writer = os.Stderr
+	oauthCallbackWait           = 5 * time.Minute
+	runBrowserCommand           = func(ctx context.Context, path string, args ...string) error {
+		cmd := exec.CommandContext(ctx, path, args...)
+		cmd.Env = browserEnvironment()
+		cmd.WaitDelay = time.Second
+		return cmd.Run()
+	}
+	blockedOAuthNets = []*net.IPNet{
 		mustCIDR("0.0.0.0/8"),
 		mustCIDR("100.64.0.0/10"),
 		mustCIDR("192.0.0.0/24"),
@@ -71,6 +81,38 @@ var (
 		mustCIDR("2001:db8::/32"),
 	}
 )
+
+func trustedBrowserLauncher(name string) (string, error) {
+	var path string
+	switch name {
+	case "open":
+		path = "/usr/bin/open"
+	case "xdg-open":
+		path = "/usr/bin/xdg-open"
+	default:
+		return "", fmt.Errorf("unsupported browser launcher %q", name)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("browser launcher is not a regular executable: %s", path)
+	}
+	return path, nil
+}
+
+func browserEnvironment() []string {
+	env := []string{"PATH=/usr/bin:/bin"}
+	for _, name := range []string{
+		"HOME", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG", "LC_ALL",
+	} {
+		if value, ok := os.LookupEnv(name); ok {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
+}
 
 func mustCIDR(raw string) *net.IPNet {
 	_, network, err := net.ParseCIDR(raw)
@@ -120,7 +162,8 @@ func LoginNamed(ctx context.Context, cfg config.File, name string) error {
 }
 
 func persistCredentialReference(cfg config.File, serverName, credentialName, source string) error {
-	if source != "env" && source != "keychain" {
+	source = config.CanonicalCredentialSource(source)
+	if source != "env" && source != "keystore" {
 		return fmt.Errorf("mcp %s token saved to unknown credential source %q", serverName, source)
 	}
 	for i := range cfg.MCPServers {
@@ -226,7 +269,7 @@ func Login(ctx context.Context, srv config.MCPServer, opts Options) (Result, err
 	authURL := authorizeURL(as.AuthorizationEndpoint, clientID, redir, challenge, state, resource, scope)
 	open := opts.OpenURL
 	if open == nil {
-		open = openBrowser
+		open = func(raw string) error { return openBrowser(ctx, raw) }
 	}
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
@@ -234,17 +277,24 @@ func Login(ctx context.Context, srv config.MCPServer, opts Options) (Result, err
 	if err := open(authURL); err != nil {
 		return Result{}, fmt.Errorf("open browser: %w", err)
 	}
-	var code string
-	select {
-	case <-ctx.Done():
-		return Result{}, ctx.Err()
-	case err := <-errCh:
+	code, err := waitForOAuthCallback(ctx, codeCh, errCh)
+	if err != nil {
 		return Result{}, err
-	case code = <-codeCh:
-	case <-time.After(5 * time.Minute):
-		return Result{}, fmt.Errorf("oauth timed out waiting for browser callback")
 	}
 	return exchangeCode(ctx, client, as.TokenEndpoint, clientID, redir, code, verifier, resource)
+}
+
+func waitForOAuthCallback(ctx context.Context, codeCh <-chan string, errCh <-chan error) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case err := <-errCh:
+		return "", err
+	case code := <-codeCh:
+		return code, nil
+	case <-time.After(oauthCallbackWait):
+		return "", fmt.Errorf("oauth timed out waiting for browser callback")
+	}
 }
 
 func withoutRedirects(client *http.Client) *http.Client {
@@ -663,6 +713,40 @@ func randomHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func openBrowser(raw string) error {
-	return exec.Command("open", raw).Start()
+func openBrowser(ctx context.Context, raw string) error {
+	return openBrowserForPlatform(ctx, runtime.GOOS, raw)
+}
+
+func openBrowserForPlatform(ctx context.Context, goos, raw string) error {
+	launcher := browserLauncher(goos)
+	if launcher == "" {
+		printManualURL(raw, "no graphical browser launcher is supported on this platform")
+		return nil
+	}
+	path, err := browserLookPath(launcher)
+	if err != nil {
+		printManualURL(raw, launcher+" is unavailable")
+		return nil
+	}
+	launchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := runBrowserCommand(launchCtx, path, raw); err != nil {
+		printManualURL(raw, launcher+" failed: "+err.Error())
+	}
+	return nil
+}
+
+func browserLauncher(goos string) string {
+	switch goos {
+	case "darwin":
+		return "open"
+	case "linux":
+		return "xdg-open"
+	default:
+		return ""
+	}
+}
+
+func printManualURL(raw, reason string) {
+	fmt.Fprintf(oauthStderr, "abox: %s; open this URL in a browser:\n%s\n", reason, raw)
 }

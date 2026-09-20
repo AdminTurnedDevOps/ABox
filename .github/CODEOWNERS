@@ -1,0 +1,5 @@
+/.github/workflows/ @AdminTurnedDevOps
+/.github/acceptance/ @AdminTurnedDevOps
+/scripts/run-linux-hardware-gate.sh @AdminTurnedDevOps
+/scripts/validate-hardware-report.py @AdminTurnedDevOps
+/scripts/verify-kvm-attestation.py @AdminTurnedDevOps

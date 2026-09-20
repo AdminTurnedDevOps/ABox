@@ -2,6 +2,16 @@
 
 ## Context
 
+**Current-platform note (Sept 2026):** This is the historical v0.2 SDK plan.
+The current SDK requires protocol 4 and architecture-tagged images with
+adjacent manifests. The host runtime is implemented for macOS/arm64 and for
+Linux amd64/arm64, but Linux VMM execution, release support, and KVM isolation
+remain **Planned** pending separate Phase 0.5 and Phase 18 evidence on the
+pinned Arch/Fedora x86_64 baselines. Linux builds use libkrun 1.19.x through
+pkg-config and the rootless native image builder; WSL2 and containerized VMM
+execution are unsupported. The original macOS-only runtime assumption is
+superseded, while macOS remains the currently runnable release path.
+
 ABox's host orchestration is already SDK-shaped: `cmd/abox/main.go` composes
 configuration, session creation or ID-based loading, source-directory
 snapshotting, VM startup, and `Sandbox.UserTurn`. The goal is a public Go SDK
@@ -114,7 +124,9 @@ Core problem (both sides currently block):
 
 - `examples/sdk-basic/main.go`: open session, run a turn with live event printing, cancel on SIGINT, print usage/cost fields, export patch, close.
 - README: new "Go SDK" section (import path, minimal snippet, guest-version caveat re: resume + `make image-update`).
-- `pkg/abox/doc.go` package docs. Note the Apple Silicon + libkrun + golden image runtime requirements up front.
+- `pkg/abox/doc.go` package docs. Note the qualified host runtime,
+  libkrun/libkrunfw, and architecture-tagged golden image plus manifest up
+  front; Linux runtime support remains gated.
 - Makefile `test` target already globs `./internal/...` — extend to `./protocol ./internal/... ./pkg/...`. (Single-line additive change; call out to user.)
 
 The docs should be built in GitHub Pages

@@ -25,7 +25,7 @@ runtime:
   isolation: microvm
   backend: libkrun
   network: deny-by-default
-  # image: /path/to/abox-guest.raw
+  # image: /path/to/abox-guest-linux-amd64.raw
   # vmm_path: /path/to/abox-vmm
 ```
 
@@ -37,6 +37,8 @@ abox --probe-vm
 
 CLI boot timeout is 45s (not a flag). SDK `Options.BootTimeout` / `VCPU` /
 `RAMMiB` / `Image` / `VMMPath` override the file for that process.
+The image needs an adjacent `.manifest.json` matching its architecture,
+protocol, and SHA-256.
 
 ## SDK
 

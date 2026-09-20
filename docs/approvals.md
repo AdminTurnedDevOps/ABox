@@ -14,6 +14,11 @@ permalink: /approvals/
 Model-authored `run_command` does not run until the host says so. Default
 is **deny**. Protocol 4 is required.
 
+An allowed command runs as the unprivileged guest user (UID/GID 1000), not as
+the root-owned guest agent. Its dedicated process group is terminated when the
+command returns or is canceled, so `allow_once` cannot leave a background shell
+or replace `/usr/local/bin/abox-guest` for a later resume.
+
 MCP tools, `apply_patch`, and the read-only builtins do not prompt. Host
 import of a guest patch is not built yet.
 

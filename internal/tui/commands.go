@@ -15,9 +15,9 @@ type slashCmd struct {
 }
 
 var slashCommands = []slashCmd{
-	{Name: "/provider", Help: "Connect Grok, OpenAI, or Anthropic and set an API key"},
-	{Name: "/credential", Help: "Point a model at Vault, Azure Key Vault, or AWS Secrets Manager"},
-	{Name: "/mcp", Help: "List MCP servers and paste a Bearer token (OAuth: abox mcp login)"},
+	{Name: "/provider", Help: "Connect a provider and save an API key in the OS keystore"},
+	{Name: "/credential", Help: "Point a model at a cloud credential store"},
+	{Name: "/mcp", Help: "Save an MCP Bearer token in the OS keystore (OAuth: abox mcp login)"},
 	{Name: "/help", Help: "List slash commands"},
 }
 

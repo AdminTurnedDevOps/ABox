@@ -81,7 +81,7 @@ type runCommandApprovalRequest struct {
 	settled  chan struct{}
 }
 
-// Presence is cached: the render path must not shell out to keychain or HTTP.
+// Presence is cached: the render path must not access an OS keystore or HTTP.
 type credStatusMsg struct {
 	sel     string
 	prov    map[string]string
@@ -977,7 +977,7 @@ func max(a, b int) int {
 	return b
 }
 
-func Run(cfg config.File, sel config.Model, sb *runtime.Sandbox, broker *hostbroker.Broker, vmState string, log []string, resolver *credsource.Resolver, transcriptPath string) error {
+func Run(ctx context.Context, cfg config.File, sel config.Model, sb *runtime.Sandbox, broker *hostbroker.Broker, vmState string, log []string, resolver *credsource.Resolver, transcriptPath string) error {
 	if resolver == nil {
 		resolver = credsource.NewResolver()
 	}
@@ -992,7 +992,10 @@ func Run(cfg config.File, sel config.Model, sb *runtime.Sandbox, broker *hostbro
 			return fmt.Errorf("configure run_command approval: %w", err)
 		}
 	}
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithContext(ctx))
 	_, err := p.Run()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	return err
 }

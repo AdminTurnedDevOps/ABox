@@ -21,7 +21,7 @@ func TestApplyProviderKeyAddsMissingProfileWithCurrentReference(t *testing.T) {
 		if envName != "OPENAI_API_KEY" || value != "secret" {
 			t.Fatalf("save %q %q", envName, value)
 		}
-		return credsource.SaveResult{Source: "keychain", Keychain: true, Note: "test"}, nil
+		return credsource.SaveResult{Source: "keystore", Keystore: true, Note: "test"}, nil
 	}
 
 	cfg := config.Defaults()
@@ -31,7 +31,7 @@ func TestApplyProviderKeyAddsMissingProfileWithCurrentReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.Name != choice.Name || sel.Credential == nil || sel.Credential.Source != "keychain" || sel.Credential.Name != choice.Env {
+	if sel.Name != choice.Name || sel.Credential == nil || sel.Credential.Source != "keystore" || sel.Credential.Name != choice.Env {
 		t.Fatalf("selected model %+v", sel)
 	}
 	persisted, _, err := config.Load()

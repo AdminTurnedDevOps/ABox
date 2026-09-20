@@ -1,4 +1,4 @@
-//go:build !darwin || !arm64
+//go:build !cgo || (!darwin && !linux) || (darwin && !arm64) || (linux && !amd64 && !arm64)
 
 package main
 
@@ -8,9 +8,6 @@ import (
 	"github.com/AdminTurnedDevOps/ABox/internal/vmmconfig"
 )
 
-// startVM is a GOOS link stub: main.go always calls it, so this OS needs a
-// definition. The libkrun implementation is start_darwin_arm64.go (macOS
-// Apple Silicon). Not a placeholder for a Linux/Windows VMM.
 func startVM(cfg vmmconfig.Config) error {
-	return fmt.Errorf("abox-vmm requires macOS on Apple Silicon with libkrun")
+	return fmt.Errorf("abox-vmm requires cgo and libkrun on macOS arm64 or Linux amd64/arm64")
 }

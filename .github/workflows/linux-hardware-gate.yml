@@ -1,0 +1,187 @@
+name: Linux KVM hardware gate
+
+on:
+  workflow_call:
+    inputs:
+      candidate_artifact:
+        type: string
+        required: true
+      candidate_file:
+        type: string
+        required: true
+      candidate_sha256:
+        type: string
+        required: true
+      commit:
+        type: string
+        required: true
+      tag:
+        type: string
+        required: true
+
+jobs:
+  arch-kvm:
+    name: Protected Arch x86_64 exact-artifact acceptance
+    environment: linux-kvm-release
+    runs-on:
+      group: abox-kvm-release
+      labels: abox-kvm-arch
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: candidate
+      - name: Run trusted Arch hardware suite
+        id: gate
+        env:
+          ABOX_EVIDENCE_DIR: ${{ runner.temp }}/abox-evidence-arch
+          EXPECTED_RUNNER: ${{ vars.ABOX_KVM_ARCH_RUNNER_NAME }}
+          HARNESS_SHA256: ${{ vars.ABOX_KVM_ARCH_HARNESS_SHA256 }}
+          POLICY_SHA256: ${{ vars.ABOX_KVM_ACCEPTANCE_SHA256 }}
+          CANDIDATE_FILE: ${{ inputs.candidate_file }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          manifest_sha=$(sh scripts/run-linux-hardware-gate.sh \
+            arch "candidate/$CANDIDATE_FILE" "$CANDIDATE_SHA256" \
+            "$COMMIT" "$EXPECTED_RUNNER" \
+            /opt/abox-kvm-gate/v1/run "$HARNESS_SHA256" | tail -n 1)
+          test -n "$POLICY_SHA256"
+          test "$manifest_sha" = "$POLICY_SHA256"
+          echo "manifest-sha256=$manifest_sha" >> "$GITHUB_OUTPUT"
+      - name: Build Arch attestation predicate
+        env:
+          EVIDENCE: ${{ runner.temp }}/abox-evidence-arch
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          COMMIT: ${{ inputs.commit }}
+          MANIFEST_SHA256: ${{ steps.gate.outputs.manifest-sha256 }}
+          HARNESS_SHA256: ${{ vars.ABOX_KVM_ARCH_HARNESS_SHA256 }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          evidence = pathlib.Path(os.environ["EVIDENCE"])
+          report = json.loads((evidence / "report.json").read_text(encoding="utf-8"))
+          predicate = dict(report)
+          predicate["baseline"] = "arch-2026-09-17-x86_64-libkrun-1.19.4-1-libkrunfw-5.5.0-1"
+          predicate["harness_sha256"] = os.environ["HARNESS_SHA256"]
+          if predicate["candidate_sha256"] != os.environ["CANDIDATE_SHA256"]:
+              raise SystemExit("report candidate digest changed before attestation")
+          if predicate["commit"] != os.environ["COMMIT"]:
+              raise SystemExit("report commit changed before attestation")
+          if predicate["acceptance_manifest_sha256"] != os.environ["MANIFEST_SHA256"]:
+              raise SystemExit("report acceptance manifest changed before attestation")
+          (evidence / "predicate.json").write_text(
+              json.dumps(predicate, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+      - name: Sign Arch KVM evidence with GitHub OIDC
+        id: attest
+        uses: actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc # v2
+        with:
+          subject-path: candidate/${{ inputs.candidate_file }}
+          predicate-type: https://github.com/AdminTurnedDevOps/ABox/attestations/kvm-test/v1
+          predicate-path: ${{ runner.temp }}/abox-evidence-arch/predicate.json
+      - name: Collect signed Arch evidence
+        run: cp '${{ steps.attest.outputs.bundle-path }}' '${{ runner.temp }}/abox-evidence-arch/attestation.json'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kvm-evidence-${{ inputs.tag }}-arch
+          path: ${{ runner.temp }}/abox-evidence-arch/
+          if-no-files-found: error
+          retention-days: 30
+
+  fedora-kvm:
+    name: Protected Fedora 44 x86_64 exact-artifact acceptance
+    environment: linux-kvm-release
+    runs-on:
+      group: abox-kvm-release
+      labels: abox-kvm-fedora
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: candidate
+      - name: Run trusted Fedora hardware suite
+        id: gate
+        env:
+          ABOX_EVIDENCE_DIR: ${{ runner.temp }}/abox-evidence-fedora
+          EXPECTED_RUNNER: ${{ vars.ABOX_KVM_FEDORA_RUNNER_NAME }}
+          HARNESS_SHA256: ${{ vars.ABOX_KVM_FEDORA_HARNESS_SHA256 }}
+          POLICY_SHA256: ${{ vars.ABOX_KVM_ACCEPTANCE_SHA256 }}
+          CANDIDATE_FILE: ${{ inputs.candidate_file }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          manifest_sha=$(sh scripts/run-linux-hardware-gate.sh \
+            fedora "candidate/$CANDIDATE_FILE" "$CANDIDATE_SHA256" \
+            "$COMMIT" "$EXPECTED_RUNNER" \
+            /opt/abox-kvm-gate/v1/run "$HARNESS_SHA256" | tail -n 1)
+          test -n "$POLICY_SHA256"
+          test "$manifest_sha" = "$POLICY_SHA256"
+          echo "manifest-sha256=$manifest_sha" >> "$GITHUB_OUTPUT"
+      - name: Build Fedora attestation predicate
+        env:
+          EVIDENCE: ${{ runner.temp }}/abox-evidence-fedora
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          COMMIT: ${{ inputs.commit }}
+          MANIFEST_SHA256: ${{ steps.gate.outputs.manifest-sha256 }}
+          HARNESS_SHA256: ${{ vars.ABOX_KVM_FEDORA_HARNESS_SHA256 }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          evidence = pathlib.Path(os.environ["EVIDENCE"])
+          report = json.loads((evidence / "report.json").read_text(encoding="utf-8"))
+          predicate = dict(report)
+          predicate["baseline"] = "fedora-44-x86_64-libkrun-1.19.0-1.fc44-libkrunfw-5.5.0-1.fc44-selinux-enforcing"
+          predicate["harness_sha256"] = os.environ["HARNESS_SHA256"]
+          if predicate["candidate_sha256"] != os.environ["CANDIDATE_SHA256"]:
+              raise SystemExit("report candidate digest changed before attestation")
+          if predicate["commit"] != os.environ["COMMIT"]:
+              raise SystemExit("report commit changed before attestation")
+          if predicate["acceptance_manifest_sha256"] != os.environ["MANIFEST_SHA256"]:
+              raise SystemExit("report acceptance manifest changed before attestation")
+          (evidence / "predicate.json").write_text(
+              json.dumps(predicate, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+      - name: Sign Fedora KVM evidence with GitHub OIDC
+        id: attest
+        uses: actions/attest@ce27ba3b4a9a139d9a20a4a07d69fabb52f1e5bc # v2
+        with:
+          subject-path: candidate/${{ inputs.candidate_file }}
+          predicate-type: https://github.com/AdminTurnedDevOps/ABox/attestations/kvm-test/v1
+          predicate-path: ${{ runner.temp }}/abox-evidence-fedora/predicate.json
+      - name: Collect signed Fedora evidence
+        run: cp '${{ steps.attest.outputs.bundle-path }}' '${{ runner.temp }}/abox-evidence-fedora/attestation.json'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kvm-evidence-${{ inputs.tag }}-fedora
+          path: ${{ runner.temp }}/abox-evidence-fedora/
+          if-no-files-found: error
+          retention-days: 30

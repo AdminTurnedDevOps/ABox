@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,7 +14,177 @@ import (
 type archiveEntry struct {
 	body string
 	mode int64
-	dir  bool
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=abox-test",
+		"GIT_AUTHOR_EMAIL=abox-test@example.invalid",
+		"GIT_COMMITTER_NAME=abox-test",
+		"GIT_COMMITTER_EMAIL=abox-test@example.invalid",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestOpenForSessionDiscoversCleanGitRoot(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init", "-b", "main")
+	if err := os.MkdirAll(filepath.Join(root, "nested", "project"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("tracked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "tracked.txt")
+	runGit(t, root, "commit", "-m", "initial")
+
+	snap, err := OpenForSession(filepath.Join(root, "nested", "project"), filepath.Join(t.TempDir(), "host-tree"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Ephemeral || snap.Root != root || snap.HostSource != root || snap.HEAD == "" {
+		t.Fatalf("snapshot=%+v", snap)
+	}
+	archive, err := ArchiveHEAD(snap.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readArchive(t, archive)["tracked.txt"].body; got != "tracked" {
+		t.Fatalf("tracked.txt=%q", got)
+	}
+}
+
+func TestOpenForSessionSnapshotsDirtyWorktree(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(root, "script.sh"), []byte("#!/bin/sh\necho clean\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.log"), []byte("clean"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "deleted.txt"), []byte("delete"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "script.sh", "tracked.log", "deleted.txt")
+	runGit(t, root, "commit", "-m", "initial")
+
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.env\n*.log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "script.sh"), []byte("#!/bin/sh\necho dirty\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.log"), []byte("dirty"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ignored.env"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oddName := "untracked\nfile.txt"
+	if err := os.WriteFile(filepath.Join(root, "nested", oddName), []byte("included"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := OpenForSession(filepath.Join(root, "nested"), filepath.Join(t.TempDir(), "host-tree"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Ephemeral || snap.HostSource != root || snap.Root == root {
+		t.Fatalf("snapshot=%+v", snap)
+	}
+	archive, err := ArchiveHEAD(snap.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := readArchive(t, archive)
+	for name, want := range map[string]string{
+		"script.sh":   "#!/bin/sh\necho dirty\n",
+		"tracked.log": "dirty",
+		".gitignore":  "*.env\n*.log\n",
+		filepath.ToSlash(filepath.Join("nested", oddName)): "included",
+	} {
+		if got := entries[name].body; got != want {
+			t.Fatalf("%q=%q want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{"deleted.txt", "ignored.env"} {
+		if _, ok := entries[name]; ok {
+			t.Fatalf("excluded file %q entered archive", name)
+		}
+	}
+	if entries["script.sh"].mode&0o111 == 0 {
+		t.Fatalf("script mode=%o", entries["script.sh"].mode)
+	}
+}
+
+func TestOpenForSessionExcludesHostState(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(root, "project.txt"), []byte("project"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "project.txt")
+	runGit(t, root, "commit", "-m", "initial")
+	state := filepath.Join(root, ".abox")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "credentials.env"), []byte("SECRET=value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := OpenForSessionExcluding(root, filepath.Join(state, "sessions", "test", "host-tree"), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := ArchiveHEAD(snap.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := readArchive(t, archive)
+	if _, ok := entries["project.txt"]; !ok {
+		t.Fatal("project file missing")
+	}
+	for name := range entries {
+		if name == ".abox" || strings.HasPrefix(name, ".abox/") {
+			t.Fatalf("host state included in archive: %q", name)
+		}
+	}
+}
+
+func TestOpenForSessionRejectsSelectedSymlink(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(root, "target"), []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := OpenForSession(root, filepath.Join(t.TempDir(), "host-tree")); err == nil || !strings.Contains(err.Error(), "unsupported file type") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestOpenForSessionRequiresGitWorktree(t *testing.T) {
+	_, err := OpenForSession(t.TempDir(), filepath.Join(t.TempDir(), "host-tree"))
+	if err == nil || !strings.Contains(err.Error(), "not a git worktree") {
+		t.Fatalf("error=%v", err)
+	}
 }
 
 func readArchive(t *testing.T, data []byte) map[string]archiveEntry {
@@ -33,120 +204,7 @@ func readArchive(t *testing.T, data []byte) map[string]archiveEntry {
 			t.Fatal(err)
 		}
 		out[strings.TrimSuffix(header.Name, "/")] = archiveEntry{
-			body: string(body), mode: header.Mode, dir: header.FileInfo().IsDir(),
+			body: string(body), mode: header.Mode,
 		}
-	}
-}
-
-func TestArchiveDirectorySnapshotsPlainDirectory(t *testing.T) {
-	t.Setenv("PATH", "")
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "nested", "empty"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("local=value"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("ignored.txt\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "ignored.txt"), []byte("included"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "nested", "script.sh"), []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	source, data, err := ArchiveDirectory(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantSource, _ := filepath.Abs(root)
-	if source != wantSource {
-		t.Fatalf("source=%q want %q", source, wantSource)
-	}
-	entries := readArchive(t, data)
-	if got := entries[".env"].body; got != "local=value" {
-		t.Fatalf(".env=%q", got)
-	}
-	if got := entries["ignored.txt"].body; got != "included" {
-		t.Fatalf("ignored.txt=%q", got)
-	}
-	if got := entries["nested/script.sh"]; got.body != "#!/bin/sh\necho ok\n" || got.mode&0o111 == 0 {
-		t.Fatalf("script=%+v", got)
-	}
-	if got := entries["nested/empty"]; !got.dir {
-		t.Fatalf("empty directory=%+v", got)
-	}
-}
-
-func TestArchiveDirectoryUsesExactDirectoryAndExcludesGitMetadata(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "chosen")
-	if err := os.MkdirAll(filepath.Join(source, ".git", "objects"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(source, "nested", ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "outside.txt"), []byte("outside"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "inside.txt"), []byte("inside"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, ".git", "HEAD"), []byte("secret metadata"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, data, err := ArchiveDirectory(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entries := readArchive(t, data)
-	if _, ok := entries["inside.txt"]; !ok {
-		t.Fatal("selected directory file missing")
-	}
-	for name := range entries {
-		if name == "outside.txt" || name == ".git" || strings.Contains(name, "/.git") {
-			t.Fatalf("unexpected archive entry %q", name)
-		}
-	}
-}
-
-func TestArchiveDirectoryRejectsSymlink(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "target"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("target", filepath.Join(root, "link")); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	_, _, err := ArchiveDirectory(root)
-	if err == nil || !strings.Contains(err.Error(), "unsupported file type") {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestArchiveDirectoryRejectsInvalidSource(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(file, []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := ArchiveDirectory(file); err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("file error=%v", err)
-	}
-	if _, _, err := ArchiveDirectory(filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Fatal("expected missing-directory error")
-	}
-}
-
-func TestArchiveDirectorySupportsEmptyDirectory(t *testing.T) {
-	_, data, err := ArchiveDirectory(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if entries := readArchive(t, data); len(entries) != 0 {
-		t.Fatalf("entries=%v", entries)
 	}
 }

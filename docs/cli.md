@@ -23,7 +23,7 @@ abox --probe-vm                   # boot + list_files; no model call
 abox exec --prompt "…"            # headless JSON events on stdout
 abox mcp add --mode <direct|agentgateway> [--credential-env NAME] <name> <url>
 abox mcp login <name>
-abox creds migrate                # credentials.env → macOS keychain
+abox creds migrate                # credentials.env -> OS keystore
 ```
 
 `--exec` is an alias of the `exec` subcommand. `exec` requires `--prompt`.
@@ -77,9 +77,11 @@ Footer hints change with the mode. `/help` lists slash commands.
 | `/help` | Print the list above into the transcript |
 
 `/provider` and `/mcp` save the secret with
-[SavePreferred]({{ '/credentials' | relative_url }}#where-keys-live):
-macOS keychain first, `~/.abox/credentials.env` if the keychain is locked.
-OAuth for MCP is `abox mcp login`, not the TUI.
+[SavePreferred]({{ '/credentials' | relative_url }}#where-keys-live): OS
+keystore first (macOS Keychain or Linux Secret Service), then a warned
+`~/.abox/credentials.env` fallback if the keystore is unavailable or locked.
+OAuth for MCP is `abox mcp login`, not the TUI. Linux uses `xdg-open`; if it is
+missing or fails, ABox prints the authorization URL for manual use.
 
 `/credential` writes a **reference** into `config.yaml`. It does not store
 cloud tokens. The host must already be able to talk to that backend.
@@ -115,9 +117,12 @@ runtime:
   isolation: microvm
   backend: libkrun
   network: deny-by-default
-  # image: /path/to/abox-guest.raw
+  # image: /path/to/abox-guest-linux-amd64.raw
   # vmm_path: /path/to/abox-vmm
 ```
 
 SDK `Options.VCPU` / `RAMMiB` / `Image` / `VMMPath` override the file for
 that process.
+
+Custom images require an adjacent `<image>.manifest.json` with a matching
+guest architecture, protocol, and SHA-256.

@@ -6,171 +6,353 @@ on:
       bump:
         description: Bump this component of the latest tag (ignored when Version is set, or when there are no tags yet)
         type: choice
-        options:
-          - patch
-          - minor
-          - major
+        options: [patch, minor, major]
         default: patch
       version:
-        description: Explicit version with no v prefix (for example 1.0.0). Leave empty to auto-bump. With no tags, the first release is 1.0.0.
+        description: Explicit version with no v prefix (for example 1.0.0). Leave empty to auto-bump.
         required: false
         default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: macos-15
+  version:
+    name: Resolve candidate version
+    runs-on: ubuntu-latest
+    outputs:
+      previous: ${{ steps.version.outputs.previous }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Require Apple Silicon
-        run: |
-          set -euo pipefail
-          if [ "$(uname -m)" != "arm64" ]; then
-            echo "abox-vmm must build on Apple Silicon; runner is $(uname -m)" >&2
-            exit 1
-          fi
-
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
           fetch-tags: true
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
+          persist-credentials: false
       - name: Resolve next version
-        id: ver
+        id: version
         env:
-          OVERRIDE: ${{ inputs.version }}
           BUMP: ${{ inputs.bump }}
+          OVERRIDE: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          git fetch --tags --force
-          OVERRIDE="$(printf '%s' "$OVERRIDE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^v//')"
-
-          normalize() {
-            # 1 -> 1.0.0; 1.0 -> 1.0.0; 1.0.0 -> 1.0.0
-            local v="$1"
-            local a b c rest
-            a="${v%%.*}"
-            rest="${v#"$a"}"
-            rest="${rest#.}"
-            if [ -z "$rest" ]; then
-              echo "${a}.0.0"
-              return
-            fi
-            b="${rest%%.*}"
-            c="${rest#"$b"}"
-            c="${c#.}"
-            if [ -z "$c" ]; then
-              c=0
-            fi
-            echo "${a}.${b}.${c}"
-          }
-
-          LATEST="$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 || true)"
-
-          if [ -n "$OVERRIDE" ]; then
-            VER="$(normalize "$OVERRIDE")"
-          else
-            if [ -z "$LATEST" ]; then
-              VER="1.0.0"
-            else
-              CUR="$(normalize "${LATEST#v}")"
-              MA="${CUR%%.*}"
-              REST="${CUR#*.}"
-              MI="${REST%%.*}"
-              PA="${REST#*.}"
-              case "$BUMP" in
-                major)
-                  MA=$((MA + 1))
-                  MI=0
-                  PA=0
-                  ;;
-                minor)
-                  MI=$((MI + 1))
-                  PA=0
-                  ;;
-                patch | *)
-                  PA=$((PA + 1))
-                  ;;
-              esac
-              VER="${MA}.${MI}.${PA}"
-            fi
-          fi
-
-          TAG="v${VER}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "tag ${TAG} already exists" >&2
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "releases must be dispatched from refs/heads/main, not $GITHUB_REF" >&2
             exit 1
           fi
-          echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "previous=${LATEST}" >> "$GITHUB_OUTPUT"
-          echo "next release ${TAG} (bump=${BUMP} previous=${LATEST:-none})"
+          override=$(printf '%s' "$OVERRIDE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^v//')
+          latest=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 || true)
 
+          normalize() {
+            local value=$1 major minor patch rest
+            major=${value%%.*}
+            rest=${value#"$major"}
+            rest=${rest#.}
+            if [ -z "$rest" ]; then printf '%s.0.0\n' "$major"; return; fi
+            minor=${rest%%.*}
+            patch=${rest#"$minor"}
+            patch=${patch#.}
+            [ -n "$patch" ] || patch=0
+            printf '%s.%s.%s\n' "$major" "$minor" "$patch"
+          }
+
+          if [ -n "$override" ]; then
+            version=$(normalize "$override")
+          elif [ -z "$latest" ]; then
+            version=1.0.0
+          else
+            current=$(normalize "${latest#v}")
+            major=${current%%.*}
+            rest=${current#*.}
+            minor=${rest%%.*}
+            patch=${rest#*.}
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+              *) echo "invalid bump: $BUMP" >&2; exit 1 ;;
+            esac
+            version=$major.$minor.$patch
+          fi
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "invalid release version: $version" >&2
+            exit 1
+          fi
+          tag=v$version
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "tag already exists: $tag" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "previous=$latest" >> "$GITHUB_OUTPUT"
+
+  macos-candidate:
+    name: Build macOS arm64 candidate
+    needs: version
+    runs-on: macos-15
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Require Apple Silicon
+        run: test "$(uname -m)" = arm64
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
       - name: Test
         run: make test
-
       - name: Install libkrun
-        env:
-          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
         run: |
           set -euo pipefail
           brew tap libkrun/krun
-          brew trust libkrun/krun || true
-          # The tap's libkrunfw Sequoia bottle URL 404s (brew asks for
-          # libkrunfw-64.*.bottle.1.tgz; the asset is libkrunfw-5.5.0.*).
-          # Formula "source" is already a prebuilt aarch64 tarball.
           brew install --build-from-source libkrunfw
           brew install libkrun
-
-      - name: Build
-        run: make build
-
-      - name: Package
+          test "$(brew list --versions libkrun)" = 'libkrun 1.19.4'
+          test "$(brew list --versions libkrunfw)" = 'libkrunfw 5.5.0'
+      - name: Build candidate artifacts
         env:
-          TAG: ${{ steps.ver.outputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
+          make build IMAGE_ID="$TAG"
           mkdir -p dist
           tar -C bin -czf "dist/abox_${TAG}_darwin_arm64.tar.gz" abox abox-vmm
-          cp bin/abox-guest-linux-arm64 "dist/abox-guest_${TAG}_linux_arm64"
-          chmod 0755 "dist/abox-guest_${TAG}_linux_arm64"
-          (cd dist && shasum -a 256 * > SHA256SUMS)
+          install -m 0755 bin/abox-guest-linux-arm64 "dist/abox-guest_${TAG}_linux_arm64"
+          (cd dist && shasum -a 256 "abox_${TAG}_darwin_arm64.tar.gz" \
+            "abox-guest_${TAG}_linux_arm64" > SHA256SUMS.darwin)
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/abox_${{ needs.version.outputs.tag }}_darwin_arm64.tar.gz
+            dist/abox-guest_${{ needs.version.outputs.tag }}_linux_arm64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-candidate-${{ needs.version.outputs.tag }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
 
+  linux-candidate:
+    name: Build Linux amd64 candidate on pinned Arch snapshot
+    needs: version
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel@sha256:4894f5a268c696fad671966f383175a13faf433c9d9c88cdd4e32eaa2d18838b
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    outputs:
+      artifact: ${{ steps.package.outputs.artifact }}
+      file: ${{ steps.package.outputs.file }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - name: Install pinned build dependencies
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'Server = https://archive.archlinux.org/repos/2026/09/17/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+          pacman -Syyu --noconfirm
+          pacman -S --needed --noconfirm git curl ca-certificates pkgconf \
+            fakeroot e2fsprogs \
+            zstd python shadow util-linux binutils file
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install checksum/signature-pinned libkrun pair
+        run: sh scripts/install-arch-libkrun.sh
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Build and package as an unprivileged user
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          useradd --create-home --shell /bin/bash abox-build
+          chown -R abox-build:abox-build "$GITHUB_WORKSPACE"
+          epoch=$(git show -s --format=%ct "$GITHUB_SHA")
+          runuser -u abox-build -- env HOME=/home/abox-build PATH="$PATH" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" TAG="$TAG" SOURCE_DATE_EPOCH="$epoch" \
+            sh -c '
+              set -eu
+              cd "$GITHUB_WORKSPACE"
+              sh scripts/check-libkrun.sh 1.19.4 libkrunfw.so.5
+              CGO_ENABLED=1 make test
+               CGO_ENABLED=1 make abox vmm guest GUEST_ARCH=amd64 IMAGE_ID="$TAG"
+               make image GUEST_ARCH=amd64 IMAGE_ID="$TAG" IMAGE="$GITHUB_WORKSPACE/dist/abox-guest-linux-amd64.raw"
+              sh scripts/package-linux-release.sh "$TAG" \
+                "$GITHUB_WORKSPACE/dist/abox-guest-linux-amd64.raw" \
+                "$GITHUB_WORKSPACE/dist/release"
+            '
+      - name: Verify and expose immutable candidate digest
+        id: package
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          file="abox_${TAG}_linux_amd64.tar.gz"
+          sha=$(sha256sum "dist/release/$file")
+          sha=${sha%% *}
+          expected=$(cut -d' ' -f1 "dist/release/$file.sha256")
+          test "$sha" = "$expected"
+          sh scripts/verify-linux-release.sh "dist/release/$file" "$sha" 1.19.4
+          echo "artifact=linux-candidate-$TAG" >> "$GITHUB_OUTPUT"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/release/${{ steps.package.outputs.file }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.package.outputs.artifact }}
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-hardware-gates:
+    name: Protected Arch and Fedora KVM gates
+    needs: [version, macos-candidate, linux-candidate]
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/linux-hardware-gate.yml
+    with:
+      candidate_artifact: ${{ needs.linux-candidate.outputs.artifact }}
+      candidate_file: ${{ needs.linux-candidate.outputs.file }}
+      candidate_sha256: ${{ needs.linux-candidate.outputs.sha256 }}
+      commit: ${{ github.sha }}
+      tag: ${{ needs.version.outputs.tag }}
+    secrets: inherit
+
+  publish:
+    name: Verify evidence and publish
+    needs: [version, macos-candidate, linux-candidate, linux-hardware-gates]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      attestations: read
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: macos-candidate-${{ needs.version.outputs.tag }}
+          path: dist/macos
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.linux-candidate.outputs.artifact }}
+          path: dist/linux
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: kvm-evidence-${{ needs.version.outputs.tag }}-arch
+          path: evidence/arch
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: kvm-evidence-${{ needs.version.outputs.tag }}-fedora
+          path: evidence/fedora
+      - name: Verify candidate provenance and both signed KVM predicates
+        env:
+          CANDIDATE_FILE: ${{ needs.linux-candidate.outputs.file }}
+          CANDIDATE_SHA256: ${{ needs.linux-candidate.outputs.sha256 }}
+          ARCH_RUNNER: ${{ vars.ABOX_KVM_ARCH_RUNNER_NAME }}
+          ARCH_HARNESS_SHA256: ${{ vars.ABOX_KVM_ARCH_HARNESS_SHA256 }}
+          FEDORA_RUNNER: ${{ vars.ABOX_KVM_FEDORA_RUNNER_NAME }}
+          FEDORA_HARNESS_SHA256: ${{ vars.ABOX_KVM_FEDORA_HARNESS_SHA256 }}
+          TAG: ${{ needs.version.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          candidate="dist/linux/$CANDIDATE_FILE"
+          actual=$(sha256sum "$candidate")
+          actual=${actual%% *}
+          test "$actual" = "$CANDIDATE_SHA256"
+          gh attestation verify "$candidate" --repo "$GITHUB_REPOSITORY" \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA"
+          for distro in arch fedora; do
+            if [ "$distro" = arch ]; then
+              expected_runner=$ARCH_RUNNER
+              expected_harness=$ARCH_HARNESS_SHA256
+            else
+              expected_runner=$FEDORA_RUNNER
+              expected_harness=$FEDORA_HARNESS_SHA256
+            fi
+            gh attestation verify "$candidate" \
+              --bundle "evidence/$distro/attestation.json" \
+              --repo "$GITHUB_REPOSITORY" \
+              --predicate-type https://github.com/AdminTurnedDevOps/ABox/attestations/kvm-test/v1 \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/linux-hardware-gate.yml" \
+              --source-digest "$GITHUB_SHA" \
+              --format json > "evidence/$distro/verification.json"
+            python3 scripts/verify-kvm-attestation.py \
+              "evidence/$distro/verification.json" "evidence/$distro/predicate.json" \
+              "evidence/$distro/report.json" "$candidate" "$distro" "$GITHUB_SHA" \
+              .github/acceptance/linux-kvm-v1.json "$expected_runner" "$expected_harness"
+          done
+          (cd dist/macos && shasum -a 256 -c SHA256SUMS.darwin)
+          for subject in \
+            "dist/macos/abox_${TAG}_darwin_arm64.tar.gz" \
+            "dist/macos/abox-guest_${TAG}_linux_arm64"; do
+            gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA"
+          done
+      - name: Prepare release assets
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp dist/macos/abox_*_darwin_arm64.tar.gz release-assets/
+          cp dist/macos/abox-guest_*_linux_arm64 release-assets/
+          cp dist/linux/abox_*_linux_amd64.tar.gz release-assets/
+          for distro in arch fedora; do
+            cp "evidence/$distro/attestation.json" "release-assets/kvm-${distro}-${TAG}.attestation.json"
+            cp "evidence/$distro/report.json" "release-assets/kvm-${distro}-${TAG}.report.json"
+          done
+          (cd release-assets && sha256sum * > SHA256SUMS)
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.ver.outputs.tag }}
-          PREV: ${{ steps.ver.outputs.previous }}
+          PREVIOUS: ${{ needs.version.outputs.previous }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
-          # GitHub --generate-notes lists merged PRs only. This repo
-          # ships from main commits, so notes are git log since PREV.
           {
             echo "## What's Changed"
             echo
-            if [ -n "${PREV}" ]; then
-              git log --no-merges --pretty=format:'- %s (%h)' "${PREV}..${GITHUB_SHA}"
+            if [ -n "$PREVIOUS" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "$PREVIOUS..$GITHUB_SHA"
               echo
               echo
-              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+              echo "**Full Changelog**: https://github.com/$GITHUB_REPOSITORY/compare/$PREVIOUS...$TAG"
             else
-              git log --no-merges --pretty=format:'- %s (%h)' "${GITHUB_SHA}"
+              git log --no-merges --pretty=format:'- %s (%h)' "$GITHUB_SHA"
               echo
             fi
-          } > /tmp/release-notes.md
+          } > "$RUNNER_TEMP/release-notes.md"
           gh release create "$TAG" \
+            --draft \
             --title "ABox $TAG" \
-            --notes-file /tmp/release-notes.md \
-            --target "${GITHUB_SHA}" \
-            dist/abox_"${TAG}"_darwin_arm64.tar.gz \
-            dist/abox-guest_"${TAG}"_linux_arm64 \
-            dist/SHA256SUMS
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --target "$GITHUB_SHA" \
+            release-assets/*
+          gh release edit "$TAG" --draft=false

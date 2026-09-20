@@ -23,6 +23,9 @@ abox exec --prompt "Count slowly from 1 to 50 in words."
 ```
 
 In the TUI, Ctrl+C quits (and denies an in-flight approval first).
+On Linux, top-level SIGTERM and SIGHUP also cancel and return through bounded VM
+cleanup; the Linux helper fallback is SIGTERM. macOS retains its interrupt
+fallback.
 `MaxTurns` and a turn `Timeout` are [SDK-only](#sdk)
 ([Turn options]({{ '/examples/turn-opts' | relative_url }})).
 

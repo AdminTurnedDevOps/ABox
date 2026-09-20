@@ -1,13 +1,12 @@
-//go:build !linux
+//go:build !linux || !abox_guest
 
 package tools
 
 import "fmt"
 
-// Freeze is a GOOS link stub so package tools builds on the host. The ioctl
-// is freeze_linux.go (guest). Host code does not call this. Not a placeholder
-// for host-side filesystem freeze.
-func Freeze() error { return fmt.Errorf("FIFREEZE only available on linux") }
+// Freeze is deliberately selected by untagged host builds, including Linux.
+// Only an explicit abox_guest build may contain the root-filesystem ioctl.
+func Freeze() error { return fmt.Errorf("FIFREEZE only available in a tagged Linux guest build") }
 
 // Thaw is the matching GOOS link stub. See Freeze.
-func Thaw() error { return fmt.Errorf("FITHAW only available on linux") }
+func Thaw() error { return fmt.Errorf("FITHAW only available in a tagged Linux guest build") }

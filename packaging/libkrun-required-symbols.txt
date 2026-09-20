@@ -1,0 +1,12 @@
+krun_add_disk3
+krun_add_vsock
+krun_add_vsock_port
+krun_create_ctx
+krun_disable_implicit_vsock
+krun_free_ctx
+krun_has_feature
+krun_set_console_output
+krun_set_exec
+krun_set_root_disk_remount
+krun_set_vm_config
+krun_start_enter

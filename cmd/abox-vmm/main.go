@@ -19,6 +19,16 @@ func main() {
 }
 
 func run() error {
+	liveness := os.NewFile(3, "supervisor-liveness")
+	if liveness == nil {
+		return fmt.Errorf("liveness fd 3 is required")
+	}
+	if _, err := liveness.Stat(); err != nil {
+		return fmt.Errorf("liveness fd 3: %w", err)
+	}
+	defer liveness.Close()
+	go watchLiveness(liveness, os.Exit)
+
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
@@ -32,4 +42,13 @@ func run() error {
 		return fmt.Errorf("root_disk and rpc_socket are required")
 	}
 	return startVM(cfg)
+}
+
+func watchLiveness(r io.Reader, exit func(int)) {
+	_, err := io.Copy(io.Discard, r)
+	if err != nil {
+		exit(1)
+		return
+	}
+	exit(0)
 }

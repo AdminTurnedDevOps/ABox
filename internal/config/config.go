@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/AdminTurnedDevOps/ABox/internal/vmmconfig"
@@ -14,7 +15,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const GuestImageName = "abox-guest.raw"
+const LegacyGuestImageName = "abox-guest.raw"
+
+func GuestImageName(arch string) string {
+	return "abox-guest-linux-" + arch + ".raw"
+}
 
 type File struct {
 	Models       []Model      `yaml:"models"`
@@ -38,6 +43,17 @@ type CredentialRef struct {
 	Name    string `yaml:"name"`
 	Field   string `yaml:"field,omitempty"`   // vault/aws only
 	Version string `yaml:"version,omitempty"` // vault/azure only
+}
+
+// CanonicalCredentialSource maps accepted local-store aliases to the portable
+// spelling written to config files.
+func CanonicalCredentialSource(source string) string {
+	switch source {
+	case "keychain", "secretservice":
+		return "keystore"
+	default:
+		return source
+	}
 }
 
 type AzureCloud struct {
@@ -109,6 +125,7 @@ func Load() (File, string, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return cfg, path, fmt.Errorf("parse config: %w", err)
 	}
+	cfg.canonicalizeCredentialSources()
 	if err := cfg.Validate(); err != nil {
 		return cfg, path, err
 	}
@@ -187,7 +204,7 @@ func scrubLegacyAppSupportCredentials(legacy string) error {
 	if !exists(path) {
 		return nil
 	}
-	body := []byte("# ABox credentials. Mode 0600. Do not commit.\n# Leftover Application Support copy; credentials now live under ~/.abox or the macOS keychain.\n")
+	body := []byte("# ABox credentials. Mode 0600. Do not commit.\n# Leftover Application Support copy; credentials now live under ~/.abox or the OS keystore.\n")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, body, 0o600); err != nil {
 		return fmt.Errorf("scrub legacy credentials: %w", err)
@@ -303,29 +320,30 @@ func (m Model) validate() error {
 
 var credentialSources = map[string]struct{}{
 	"env":      {},
-	"keychain": {},
+	"keystore": {},
 	"vault":    {},
 	"azure":    {},
 	"aws":      {},
 }
 
 func (c CredentialRef) validate() error {
-	if _, ok := credentialSources[c.Source]; !ok {
-		return fmt.Errorf("unknown source %q (want env, keychain, vault, azure, or aws)", c.Source)
+	source := CanonicalCredentialSource(c.Source)
+	if _, ok := credentialSources[source]; !ok {
+		return fmt.Errorf("unknown source %q (want env, keystore, vault, azure, or aws)", c.Source)
 	}
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("name is required")
 	}
-	switch c.Source {
-	case "env", "keychain":
+	switch source {
+	case "env", "keystore":
 		if c.Field != "" {
-			return fmt.Errorf("field is not supported for source %q", c.Source)
+			return fmt.Errorf("field is not supported for source %q", source)
 		}
 		if c.Version != "" {
-			return fmt.Errorf("version is not supported for source %q", c.Source)
+			return fmt.Errorf("version is not supported for source %q", source)
 		}
 		if !ValidEnvName(c.Name) {
-			return fmt.Errorf("invalid %s credential name %q", c.Source, c.Name)
+			return fmt.Errorf("invalid %s credential name %q", source, c.Name)
 		}
 	case "vault":
 		if c.Version != "" && !isNumeric(c.Version) {
@@ -505,7 +523,9 @@ func (m Model) EnvName() string {
 
 func (m Model) CredentialReference() CredentialRef {
 	if m.Credential != nil {
-		return *m.Credential
+		ref := *m.Credential
+		ref.Source = CanonicalCredentialSource(ref.Source)
+		return ref
 	}
 	if m.CredentialEnv != "" {
 		return CredentialRef{Source: "env", Name: m.CredentialEnv}
@@ -515,7 +535,9 @@ func (m Model) CredentialReference() CredentialRef {
 
 func (s MCPServer) CredentialReference() CredentialRef {
 	if s.Credential != nil {
-		return *s.Credential
+		ref := *s.Credential
+		ref.Source = CanonicalCredentialSource(ref.Source)
+		return ref
 	}
 	return CredentialRef{Source: "env", Name: TokenEnv(s)}
 }
@@ -552,7 +574,22 @@ func (r Resources) Resolved() (vcpu, ram int) {
 }
 
 func GuestImagePath() string {
-	return filepath.Join(ImageDir(), GuestImageName)
+	modern := filepath.Join(ImageDir(), GuestImageName(runtime.GOARCH))
+	if exists(modern) || runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		return modern
+	}
+	legacy := filepath.Join(ImageDir(), LegacyGuestImageName)
+	if exists(legacy) {
+		return legacy
+	}
+	home := homeDir()
+	if home != "" {
+		legacy = filepath.Join(home, "Library", "Caches", "ABox", "images", LegacyGuestImageName)
+		if exists(legacy) {
+			return legacy
+		}
+	}
+	return modern
 }
 
 // ResolvedMCPServers returns the MCP URLs the guest may dial.
@@ -608,6 +645,7 @@ func (c File) Save() error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
+	c = c.canonicalizedCredentialSources()
 	if err := EnsureLayout(); err != nil {
 		return err
 	}
@@ -624,6 +662,38 @@ func (c File) Save() error {
 		return err
 	}
 	return os.Chmod(path, 0o600)
+}
+
+func (c *File) canonicalizeCredentialSources() {
+	for i := range c.Models {
+		if c.Models[i].Credential != nil {
+			c.Models[i].Credential.Source = CanonicalCredentialSource(c.Models[i].Credential.Source)
+		}
+	}
+	for i := range c.MCPServers {
+		if c.MCPServers[i].Credential != nil {
+			c.MCPServers[i].Credential.Source = CanonicalCredentialSource(c.MCPServers[i].Credential.Source)
+		}
+	}
+}
+
+func (c File) canonicalizedCredentialSources() File {
+	c.Models = append([]Model(nil), c.Models...)
+	for i := range c.Models {
+		if c.Models[i].Credential != nil {
+			ref := *c.Models[i].Credential
+			c.Models[i].Credential = &ref
+		}
+	}
+	c.MCPServers = append([]MCPServer(nil), c.MCPServers...)
+	for i := range c.MCPServers {
+		if c.MCPServers[i].Credential != nil {
+			ref := *c.MCPServers[i].Credential
+			c.MCPServers[i].Credential = &ref
+		}
+	}
+	c.canonicalizeCredentialSources()
+	return c
 }
 
 func TokenEnv(server MCPServer) string {
@@ -682,18 +752,7 @@ func CacheDir() string {
 }
 
 func ImageDir() string {
-	modern := filepath.Join(Dir(), "images")
-	if exists(filepath.Join(modern, GuestImageName)) {
-		return modern
-	}
-	home := homeDir()
-	if home != "" {
-		legacy := filepath.Join(home, "Library", "Caches", "ABox", "images")
-		if exists(filepath.Join(legacy, GuestImageName)) {
-			return legacy
-		}
-	}
-	return modern
+	return filepath.Join(Dir(), "images")
 }
 
 func SessionRoot() string {

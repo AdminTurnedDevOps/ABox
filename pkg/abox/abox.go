@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -95,19 +96,39 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 		}
 		sess = loaded
 	} else {
-		sourceDir, data, err := repository.ArchiveDirectory(opts.RepoPath)
-		if err != nil {
-			resolver.Close()
-			return nil, fmt.Errorf("snapshot source directory: %w", err)
-		}
-		archive = data
-		created, err := session.Create(sourceDir)
+		created, err := session.Create(opts.RepoPath)
 		if err != nil {
 			resolver.Close()
 			return nil, fmt.Errorf("create session: %w", err)
 		}
+		snap, err := repository.OpenForSessionExcluding(opts.RepoPath, filepath.Join(created.Dir, "host-tree"), config.Dir())
+		if err != nil {
+			_ = os.RemoveAll(created.Dir)
+			resolver.Close()
+			return nil, fmt.Errorf("snapshot repository: %w", err)
+		}
+		archive, err = repository.ArchiveHEAD(snap.Root)
+		if err != nil {
+			_ = os.RemoveAll(created.Dir)
+			resolver.Close()
+			return nil, fmt.Errorf("archive repository: %w", err)
+		}
+		created.SourceDir = snap.HostSource
+		created.RepoRoot = snap.HostSource
+		created.HEAD = snap.HEAD
+		if err := created.WriteMeta(); err != nil {
+			_ = os.RemoveAll(created.Dir)
+			resolver.Close()
+			return nil, fmt.Errorf("write session metadata: %w", err)
+		}
 		sess = created
 	}
+	releaseRuntimeLock := true
+	defer func() {
+		if releaseRuntimeLock {
+			_ = sess.ReleaseRuntimeLock()
+		}
+	}()
 
 	image := opts.Image
 	if image == "" {
@@ -166,6 +187,7 @@ func open(ctx context.Context, opts Options, resume bool, resumeID string) (*Ses
 			return nil, fmt.Errorf("transfer source directory: %w", err)
 		}
 	}
+	releaseRuntimeLock = false
 	return &Session{cfg: cfg, sess: sess, sb: sb, sel: sel, resolver: resolver, broker: broker}, nil
 }
 
