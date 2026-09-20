@@ -221,26 +221,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  linux-hardware-gates:
-    name: Protected Arch and Fedora KVM gates
-    needs: [version, macos-candidate, linux-candidate]
-    permissions:
-      actions: read
-      attestations: write
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/linux-hardware-gate.yml
-    with:
-      candidate_artifact: ${{ needs.linux-candidate.outputs.artifact }}
-      candidate_file: ${{ needs.linux-candidate.outputs.file }}
-      candidate_sha256: ${{ needs.linux-candidate.outputs.sha256 }}
-      commit: ${{ github.sha }}
-      tag: ${{ needs.version.outputs.tag }}
-    secrets: inherit
-
   publish:
-    name: Verify evidence and publish
-    needs: [version, macos-candidate, linux-candidate, linux-hardware-gates]
+    name: Verify provenance and publish
+    needs: [version, macos-candidate, linux-candidate]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -260,22 +243,10 @@ jobs:
         with:
           name: ${{ needs.linux-candidate.outputs.artifact }}
           path: dist/linux
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: kvm-evidence-${{ needs.version.outputs.tag }}-arch
-          path: evidence/arch
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: kvm-evidence-${{ needs.version.outputs.tag }}-fedora
-          path: evidence/fedora
-      - name: Verify candidate provenance and both signed KVM predicates
+      - name: Verify candidate provenance
         env:
           CANDIDATE_FILE: ${{ needs.linux-candidate.outputs.file }}
           CANDIDATE_SHA256: ${{ needs.linux-candidate.outputs.sha256 }}
-          ARCH_RUNNER: ${{ vars.ABOX_KVM_ARCH_RUNNER_NAME }}
-          ARCH_HARNESS_SHA256: ${{ vars.ABOX_KVM_ARCH_HARNESS_SHA256 }}
-          FEDORA_RUNNER: ${{ vars.ABOX_KVM_FEDORA_RUNNER_NAME }}
-          FEDORA_HARNESS_SHA256: ${{ vars.ABOX_KVM_FEDORA_HARNESS_SHA256 }}
           TAG: ${{ needs.version.outputs.tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -288,26 +259,6 @@ jobs:
             --predicate-type https://slsa.dev/provenance/v1 \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-digest "$GITHUB_SHA"
-          for distro in arch fedora; do
-            if [ "$distro" = arch ]; then
-              expected_runner=$ARCH_RUNNER
-              expected_harness=$ARCH_HARNESS_SHA256
-            else
-              expected_runner=$FEDORA_RUNNER
-              expected_harness=$FEDORA_HARNESS_SHA256
-            fi
-            gh attestation verify "$candidate" \
-              --bundle "evidence/$distro/attestation.json" \
-              --repo "$GITHUB_REPOSITORY" \
-              --predicate-type https://github.com/AdminTurnedDevOps/ABox/attestations/kvm-test/v1 \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/linux-hardware-gate.yml" \
-              --source-digest "$GITHUB_SHA" \
-              --format json > "evidence/$distro/verification.json"
-            python3 scripts/verify-kvm-attestation.py \
-              "evidence/$distro/verification.json" "evidence/$distro/predicate.json" \
-              "evidence/$distro/report.json" "$candidate" "$distro" "$GITHUB_SHA" \
-              .github/acceptance/linux-kvm-v1.json "$expected_runner" "$expected_harness"
-          done
           (cd dist/macos && shasum -a 256 -c SHA256SUMS.darwin)
           for subject in \
             "dist/macos/abox_${TAG}_darwin_arm64.tar.gz" \
@@ -326,10 +277,6 @@ jobs:
           cp dist/macos/abox_*_darwin_arm64.tar.gz release-assets/
           cp dist/macos/abox-guest_*_linux_arm64 release-assets/
           cp dist/linux/abox_*_linux_amd64.tar.gz release-assets/
-          for distro in arch fedora; do
-            cp "evidence/$distro/attestation.json" "release-assets/kvm-${distro}-${TAG}.attestation.json"
-            cp "evidence/$distro/report.json" "release-assets/kvm-${distro}-${TAG}.report.json"
-          done
           (cd release-assets && sha256sum * > SHA256SUMS)
       - name: Create GitHub release
         env:

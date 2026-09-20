@@ -69,10 +69,11 @@ cgo/pkg-config checks, and rootless image creation. They are not supported VMM
 runtimes. Generic Ubuntu CI can test pure Go code and the `CGO_ENABLED=0`
 diagnostic VMM stub, but does not establish Linux VMM compatibility.
 
-The release workflow can build a Linux amd64 candidate and is wired to require
-distinct protected Arch and Fedora KVM evidence before publication. Workflow
-plumbing, an acceptance manifest, or an unexecuted gate is not passing evidence;
-no checked-in report currently opens the Linux support gate.
+The release workflow publishes the Linux amd64 candidate after build, package,
+and provenance checks, without running the protected Arch and Fedora KVM gates.
+The artifact remains experimental: publication, workflow plumbing, an acceptance
+manifest, or an unexecuted gate is not passing evidence, and no checked-in report
+currently opens the Linux support gate.
 Runner provisioning must pin `ABOX_KVM_ACCEPTANCE_SHA256` to the reviewed
 `.github/acceptance/linux-kvm-v1.json` bytes as well as the per-distro runner
 identity and root-owned harness digest variables.
